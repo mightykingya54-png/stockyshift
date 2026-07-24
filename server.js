@@ -1,0 +1,445 @@
+require('dotenv').config();
+const express = require('express');
+const session = require('express-session');
+const crypto = require('crypto');
+const axios = require('axios');
+const cron = require('node-cron');
+const db = require('./db');
+const { generatePO } = require('./lib/pdf');
+const { sendPOEmail } = require('./lib/email');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ─── Middleware ───────────────────────────────────────────────────────────
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(session({
+  secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+  resave: false,
+  saveUninitialized: false,
+}));
+
+// Serve static dashboard
+app.use(express.static('views'));
+
+// ─── Shopify OAuth ────────────────────────────────────────────────────────
+
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
+const SCOPES = process.env.SCOPES || 'read_products,write_products,read_inventory,write_inventory';
+const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
+
+// Step 1: Redirect merchant to Shopify authorization
+app.get('/auth', (req, res) => {
+  const { shop } = req.query;
+  if (!shop) return res.status(400).send('Missing shop parameter');
+
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.state = state;
+  req.session.shop = shop;
+
+  const redirectUri = `${APP_URL}/auth/callback`;
+  const installUrl = `https://${shop}/admin/oauth/authorize?` +
+    `client_id=${SHOPIFY_API_KEY}` +
+    `&scope=${SCOPES}` +
+    `&redirect_uri=${redirectUri}` +
+    `&state=${state}`;
+
+  res.redirect(installUrl);
+});
+
+// Step 2: Handle OAuth callback
+app.get('/auth/callback', async (req, res) => {
+  const { shop, code, state, host } = req.query;
+
+  // Verify state
+  if (state !== req.session.state) {
+    return res.status(403).send('State mismatch. Possible CSRF attack.');
+  }
+
+  // Verify shop domain (must end in .myshopify.com)
+  if (!shop?.endsWith('.myshopify.com')) {
+    return res.status(400).send('Invalid shop domain');
+  }
+
+  try {
+    // Exchange code for permanent access token
+    const tokenResponse = await axios.post(
+      `https://${shop}/admin/oauth/access_token`,
+      {
+        client_id: SHOPIFY_API_KEY,
+        client_secret: SHOPIFY_API_SECRET,
+        code,
+      }
+    );
+
+    const accessToken = tokenResponse.data.access_token;
+
+    // Store merchant in database
+    const stmt = db.prepare(`
+      INSERT INTO merchants (shop, access_token)
+      VALUES (?, ?)
+      ON CONFLICT(shop) DO UPDATE SET access_token = ?, is_active = 1, uninstalled_at = NULL
+    `);
+    stmt.run(shop, accessToken, accessToken);
+
+    // Redirect merchant to the embedded app or dashboard
+    res.redirect(`/?shop=${shop}`);
+  } catch (err) {
+    console.error('OAuth error:', err.response?.data || err.message);
+    res.status(500).send('Installation failed. Please try again.');
+  }
+});
+
+// ─── Embedded App Entry ──────────────────────────────────────────────────
+
+// Serve the dashboard for any root request with a shop parameter
+app.get('/', (req, res) => {
+  const { shop } = req.query;
+  if (!shop) {
+    return res.send(`
+      <h1>StockyShift</h1>
+      <p>Simple PO generator + low stock alerts for Shopify.</p>
+      <a href="/auth?shop=your-store.myshopify.com">Install on your store</a>
+    `);
+  }
+
+  // Check if merchant exists and has active session
+  const merchant = db.prepare('SELECT * FROM merchants WHERE shop = ? AND is_active = 1').get(shop);
+  if (!merchant) {
+    return res.redirect(`/auth?shop=${shop}`);
+  }
+
+  // Serve the dashboard HTML (passed as query param so JS can use it)
+  res.redirect(`/dashboard.html?shop=${shop}`);
+});
+
+// ─── API Routes ──────────────────────────────────────────────────────────
+
+// Helper: load merchant's access token
+function getToken(shop) {
+  const merchant = db.prepare('SELECT access_token FROM merchants WHERE shop = ? AND is_active = 1').get(shop);
+  return merchant?.access_token;
+}
+
+// Sync products from Shopify
+app.post('/api/sync-products', async (req, res) => {
+  const { shop } = req.body;
+  const token = getToken(shop);
+  if (!token) return res.status(401).json({ error: 'Shop not installed' });
+
+  try {
+    // Fetch all products from Shopify
+    let products = [];
+    let url = `https://${shop}/admin/api/2024-04/products.json?limit=250&fields=id,title,variants`;
+
+    while (url) {
+      const response = await axios.get(url, {
+        headers: { 'X-Shopify-Access-Token': token },
+      });
+      products = products.concat(response.data.products);
+      url = null;
+      // Check for pagination (Link header)
+      const linkHeader = response.headers.link;
+      if (linkHeader) {
+        const matches = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+        if (matches) url = matches[1];
+      }
+    }
+
+    // Get inventory levels for all products
+    const variantIds = products.flatMap(p => p.variants.map(v => v.inventory_item_id)).filter(Boolean);
+    let inventoryLevels = {};
+    if (variantIds.length > 0) {
+      // Fetch in chunks of 50 (Shopify limit for inventory_levels)
+      for (let i = 0; i < variantIds.length; i += 50) {
+        const chunk = variantIds.slice(i, i + 50).join(',');
+        const invResponse = await axios.get(
+          `https://${shop}/admin/api/2024-04/inventory_levels.json?inventory_item_ids=${chunk}`,
+          { headers: { 'X-Shopify-Access-Token': token } }
+        );
+        invResponse.data.inventory_levels.forEach(level => {
+          inventoryLevels[level.inventory_item_id] = level.available;
+        });
+      }
+    }
+
+    // Upsert products into local DB
+    const upsert = db.prepare(`
+      INSERT INTO products (shopify_product_id, shopify_variant_id, shop, title, sku, current_stock)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(shop, shopify_variant_id) DO UPDATE SET
+        title = excluded.title,
+        sku = excluded.sku,
+        current_stock = excluded.current_stock
+    `);
+
+    const insertMany = db.transaction((prods) => {
+      for (const product of prods) {
+        for (const variant of product.variants) {
+          upsert.run(
+            product.id,
+            variant.id,
+            shop,
+            product.title,
+            variant.sku || '',
+            inventoryLevels[variant.inventory_item_id] || 0
+          );
+        }
+      }
+    });
+
+    insertMany(products);
+
+    res.json({ synced: products.length });
+  } catch (err) {
+    console.error('Sync error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Sync failed' });
+  }
+});
+
+// Get low stock products (below reorder point)
+app.get('/api/low-stock', (req, res) => {
+  const { shop } = req.query;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+
+  // Join products with vendors to show vendor info alongside low stock items
+  const lowStock = db.prepare(`
+    SELECT p.*, v.name as vendor_name, v.email as vendor_email
+    FROM products p
+    LEFT JOIN vendors v ON p.preferred_vendor_id = v.id
+    WHERE p.shop = ?
+      AND p.is_active = 1
+      AND p.reorder_point > 0
+      AND p.current_stock <= p.reorder_point
+    ORDER BY (p.reorder_point - p.current_stock) DESC
+  `).all(shop);
+
+  res.json(lowStock);
+});
+
+// Get all products
+app.get('/api/products', (req, res) => {
+  const { shop } = req.query;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+
+  const products = db.prepare(`
+    SELECT * FROM products WHERE shop = ? AND is_active = 1 ORDER BY title
+  `).all(shop);
+
+  res.json(products);
+});
+
+// Update reorder point for a product
+app.post('/api/products/reorder-point', (req, res) => {
+  const { id, reorder_point, preferred_vendor_id } = req.body;
+
+  const stmt = db.prepare(`
+    UPDATE products SET reorder_point = ?, preferred_vendor_id = ? WHERE id = ?
+  `);
+  stmt.run(reorder_point || 0, preferred_vendor_id || null, id);
+
+  res.json({ success: true });
+});
+
+// ─── Vendor Routes ───────────────────────────────────────────────────────
+
+app.get('/api/vendors', (req, res) => {
+  const { shop } = req.query;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+
+  const vendors = db.prepare('SELECT * FROM vendors WHERE shop = ? ORDER BY name').all(shop);
+  res.json(vendors);
+});
+
+app.post('/api/vendors', (req, res) => {
+  const { shop, name, email, min_order_amount, notes } = req.body;
+  if (!shop || !name || !email) return res.status(400).json({ error: 'Missing required fields' });
+
+  const stmt = db.prepare('INSERT INTO vendors (shop, name, email, min_order_amount, notes) VALUES (?, ?, ?, ?, ?)');
+  const result = stmt.run(shop, name, email, min_order_amount || 0, notes || '');
+  res.json({ id: result.lastInsertRowid });
+});
+
+// ─── PO Routes ───────────────────────────────────────────────────────────
+
+
+
+app.post('/api/purchase-orders', async (req, res) => {
+  const { shop, vendor_id, items, notes } = req.body;
+  if (!shop || !vendor_id || !items?.length) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  // Generate PO number
+  const poNumber = `PO-${Date.now().toString(36).toUpperCase()}`;
+  let total = 0;
+
+  // Calculate total
+  for (const item of items) {
+    total += item.ordered_qty * (item.unit_cost || 0);
+  }
+
+  const insertPO = db.transaction(() => {
+    const poResult = db.prepare(`
+      INSERT INTO purchase_orders (shop, vendor_id, po_number, total, notes)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(shop, vendor_id, poNumber, total, notes || '');
+
+    const poId = poResult.lastInsertRowid;
+
+    const insertItem = db.prepare(`
+      INSERT INTO po_line_items (po_id, product_id, ordered_qty, unit_cost)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    for (const item of items) {
+      insertItem.run(poId, item.product_id, item.ordered_qty, item.unit_cost || 0);
+    }
+
+    return poId;
+  });
+
+  const poId = insertPO();
+  res.json({ po_id: poId, po_number: poNumber, total });
+});
+
+// Send PO email
+app.post('/api/purchase-orders/:id/send', async (req, res) => {
+  const { id } = req.params;
+  const { shop } = req.body;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+
+  const po = db.prepare(`
+    SELECT po.*, v.name as vendor_name, v.email as vendor_email
+    FROM purchase_orders po
+    JOIN vendors v ON po.vendor_id = v.id
+    WHERE po.id = ? AND po.shop = ?
+  `).get(id, shop);
+
+  if (!po) return res.status(404).json({ error: 'PO not found' });
+
+  const lineItems = db.prepare(`
+    SELECT pli.*, p.title, p.sku
+    FROM po_line_items pli
+    JOIN products p ON pli.product_id = p.id
+    WHERE pli.po_id = ?
+  `).all(id);
+
+  try {
+    // Generate PDF
+    const pdfBuffer = await generatePO(po, lineItems);
+
+    // Send email
+    await sendPOEmail({
+      to: po.vendor_email,
+      subject: `Purchase Order ${po.po_number}`,
+      text: `Please find attached Purchase Order ${po.po_number}.`,
+      attachment: {
+        filename: `${po.po_number}.pdf`,
+        content: pdfBuffer,
+      },
+    });
+
+    // Mark as sent
+    db.prepare(`
+      UPDATE purchase_orders SET status = 'sent', emailed_at = CURRENT_TIMESTAMP WHERE id = ?
+    `).run(id);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Email error:', err.message);
+    res.status(500).json({ error: 'Failed to send email' });
+  }
+});
+
+// Receive against PO
+app.post('/api/purchase-orders/:id/receive', (req, res) => {
+  const { id } = req.params;
+  const { items } = req.body; // [{line_item_id, received_qty}]
+
+  const token = db.transaction(() => {
+    for (const item of items) {
+      db.prepare(`
+        UPDATE po_line_items SET received_qty = ? WHERE id = ? AND po_id = ?
+      `).run(item.received_qty, item.line_item_id, id);
+    }
+
+    // Check if all items are fully received
+    const allItems = db.prepare(`
+      SELECT ordered_qty, received_qty FROM po_line_items WHERE po_id = ?
+    `).all(id);
+
+    const allReceived = allItems.every(i => i.received_qty >= i.ordered_qty);
+    const status = allReceived ? 'received' : 'partial';
+
+    db.prepare(`
+      UPDATE purchase_orders SET status = ?, received_at = CURRENT_TIMESTAMP WHERE id = ?
+    `).run(status, id);
+  });
+
+  res.json({ success: true });
+});
+
+app.get('/api/purchase-orders', (req, res) => {
+  const { shop } = req.query;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+
+  const pos = db.prepare(`
+    SELECT po.*, v.name as vendor_name
+    FROM purchase_orders po
+    JOIN vendors v ON po.vendor_id = v.id
+    WHERE po.shop = ?
+    ORDER BY po.created_at DESC
+  `).all(shop);
+
+  res.json(pos);
+});
+
+// ─── Cron Job: Daily Low Stock Check ─────────────────────────────────────
+
+// Run at 8:00 AM every day
+cron.schedule('0 8 * * *', () => {
+  console.log('[Cron] Running daily low stock check...');
+
+  const merchants = db.prepare('SELECT shop, access_token FROM merchants WHERE is_active = 1').all();
+
+  for (const merchant of merchants) {
+    const lowStock = db.prepare(`
+      SELECT p.*, v.name as vendor_name
+      FROM products p
+      LEFT JOIN vendors v ON p.preferred_vendor_id = v.id
+      WHERE p.shop = ?
+        AND p.is_active = 1
+        AND p.reorder_point > 0
+        AND p.current_stock <= p.reorder_point
+    `).all(merchant.shop);
+
+    if (lowStock.length > 0) {
+      console.log(`[Cron] ${merchant.shop}: ${lowStock.length} products below reorder point`);
+      // In production: send a summary email to the merchant here
+    }
+  }
+});
+
+// ─── Webhook: Handle app uninstall ───────────────────────────────────────
+
+app.post('/webhooks/app/uninstalled', (req, res) => {
+  const shop = req.headers['x-shopify-shop-domain'];
+  if (!shop) return res.status(400).send('Missing shop');
+
+  db.prepare(`
+    UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = ?
+  `).run(shop);
+
+  res.status(200).send('OK');
+});
+
+// ─── Start ───────────────────────────────────────────────────────────────
+
+app.listen(PORT, () => {
+  console.log(`StockyShift running on port ${PORT}`);
+  console.log(`OAuth callback URL: ${APP_URL}/auth/callback`);
+});

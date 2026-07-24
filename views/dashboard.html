@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StockyShift — Purchase Orders & Stock Alerts</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f7fa;
+      color: #1a1a2e;
+      padding: 0;
+    }
+
+    .header {
+      background: #1a1a2e;
+      color: white;
+      padding: 16px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 { font-size: 20px; font-weight: 600; }
+    .header .shop-name { color: #a0a0b8; font-size: 14px; }
+
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 24px;
+      border-bottom: 1px solid #ddd;
+    }
+    .tab {
+      padding: 10px 20px;
+      cursor: pointer;
+      border: none;
+      background: none;
+      font-size: 14px;
+      color: #666;
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+    }
+    .tab:hover { color: #1a1a2e; }
+    .tab.active {
+      color: #1a1a2e;
+      border-bottom-color: #4a6cf7;
+      font-weight: 600;
+    }
+
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .card h2 { font-size: 16px; margin-bottom: 12px; color: #1a1a2e; }
+    .card h3 { font-size: 14px; margin-bottom: 8px; color: #444; }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th {
+      text-align: left;
+      padding: 8px 12px;
+      background: #f8f9fc;
+      color: #666;
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 2px solid #e8eaee;
+    }
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #f0f1f4;
+    }
+    tr:hover td { background: #f8f9fc; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge-danger { background: #fee2e2; color: #dc2626; }
+    .badge-warning { background: #fef3c7; color: #d97706; }
+    .badge-success { background: #d1fae5; color: #059669; }
+    .badge-info { background: #dbeafe; color: #2563eb; }
+
+    .btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .btn-primary { background: #4a6cf7; color: white; }
+    .btn-primary:hover { background: #3b5de7; }
+    .btn-success { background: #059669; color: white; }
+    .btn-success:hover { background: #047857; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .btn-outline { background: white; border: 1px solid #ddd; color: #444; }
+    .btn-outline:hover { background: #f5f5f5; }
+
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: white;
+      border-radius: 8px;
+      padding: 16px 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .stat-card .number { font-size: 28px; font-weight: 700; color: #1a1a2e; }
+    .stat-card .label { font-size: 12px; color: #888; margin-top: 4px; }
+
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 100;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-overlay.show { display: flex; }
+    .modal {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      width: 500px;
+      max-width: 90vw;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .modal h2 { margin-bottom: 16px; }
+    .modal label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; color: #444; }
+    .modal input, .modal select, .modal textarea {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+    .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+
+    .loading { text-align: center; padding: 40px; color: #888; }
+    .error { color: #dc2626; padding: 12px; background: #fee2e2; border-radius: 6px; margin-bottom: 12px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>StockyShift</h1>
+      <span class="shop-name" id="shopName"></span>
+    </div>
+    <div>
+      <button class="btn btn-primary btn-sm" onclick="syncProducts()">⟳ Sync Products</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="tabs">
+      <button class="tab active" data-tab="low-stock">⚠ Low Stock</button>
+      <button class="tab" data-tab="products">📦 Products</button>
+      <button class="tab" data-tab="vendors">🏢 Vendors</button>
+      <button class="tab" data-tab="orders">📄 Purchase Orders</button>
+    </div>
+
+    <div class="stats-row" id="statsRow"></div>
+
+    <!-- Tab: Low Stock -->
+    <div id="tab-low-stock" class="tab-content"></div>
+
+    <!-- Tab: Products -->
+    <div id="tab-products" class="tab-content hidden"></div>
+
+    <!-- Tab: Vendors -->
+    <div id="tab-vendors" class="tab-content hidden"></div>
+
+    <!-- Tab: Purchase Orders -->
+    <div id="tab-orders" class="tab-content hidden"></div>
+  </div>
+
+  <!-- Modal -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal" id="modalContent"></div>
+  </div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const shop = urlParams.get('shop');
+    document.getElementById('shopName').textContent = shop || '';
+
+    // ─── Tab switching ──────────────────────────────────────────────
+
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(tc => tc.classList.add('hidden'));
+        tab.classList.add('active');
+        const tabName = tab.dataset.tab;
+        document.getElementById(`tab-${tabName}`).classList.remove('hidden');
+        loadTab(tabName);
+      });
+    });
+
+    function loadTab(name) {
+      if (name === 'low-stock') loadLowStock();
+      if (name === 'products') loadProducts();
+      if (name === 'vendors') loadVendors();
+      if (name === 'orders') loadOrders();
+    }
+
+    // ─── Loading state ──────────────────────────────────────────────
+
+    function setLoading(tabId, message) {
+      document.getElementById(tabId).innerHTML = `<div class="loading">${message || 'Loading...'}</div>`;
+    }
+
+    // ─── API helper ─────────────────────────────────────────────────
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts,
+      });
+      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      return res.json();
+    }
+
+    // ─── Stats ──────────────────────────────────────────────────────
+
+    async function loadStats() {
+      try {
+        const lowStock = await api(`/api/low-stock?shop=${shop}`);
+        const products = await api(`/api/products?shop=${shop}`);
+        document.getElementById('statsRow').innerHTML = `
+          <div class="stat-card">
+            <div class="number">${lowStock.length}</div>
+            <div class="label">Products below reorder point</div>
+          </div>
+          <div class="stat-card">
+            <div class="number">${products.length}</div>
+            <div class="label">Total products synced</div>
+          </div>
+          <div class="stat-card">
+            <div class="number">${products.filter(p => p.reorder_point > 0).length}</div>
+            <div class="label">Products with reorder point set</div>
+          </div>
+        `;
+      } catch (e) {
+        document.getElementById('statsRow').innerHTML = `<div class="error">Failed to load stats</div>`;
+      }
+    }
+
+    // ─── Low Stock ──────────────────────────────────────────────────
+
+    async function loadLowStock() {
+      try {
+        const data = await api(`/api/low-stock?shop=${shop}`);
+        const products = await api(`/api/products?shop=${shop}`);
+
+        if (data.length === 0) {
+          document.getElementById('tab-low-stock').innerHTML = `
+            <div class="card">
+              <h2>✅ No low stock items</h2>
+              <p style="color:#666">Set reorder points on the Products tab to start monitoring stock levels.</p>
+            </div>
+          `;
+          return;
+        }
+
+        let html = `<div class="card"><h2>⚠ ${data.length} product(s) below reorder point</h2><table>
+          <tr><th>Product</th><th>SKU</th><th>Stock</th><th>Reorder at</th><th>Vendor</th><th></th></tr>`;
+
+        for (const p of data) {
+          const deficit = p.reorder_point - p.current_stock;
+          html += `<tr>
+            <td><strong>${p.title}</strong></td>
+            <td>${p.sku || '-'}</td>
+            <td><span class="badge badge-danger">${p.current_stock}</span></td>
+            <td>${p.reorder_point}</td>
+            <td>${p.vendor_name || '-'}</td>
+            <td>
+              <button class="btn btn-primary btn-sm" onclick="createPOForProduct(${p.id})">Order</button>
+            </td>
+          </tr>`;
+        }
+
+        html += '</table></div>';
+        document.getElementById('tab-low-stock').innerHTML = html;
+      } catch (e) {
+        document.getElementById('tab-low-stock').innerHTML = `<div class="error">Failed to load low stock data</div>`;
+      }
+    }
+
+    // ─── Products ───────────────────────────────────────────────────
+
+    async function loadProducts() {
+      try {
+        const data = await api(`/api/products?shop=${shop}`);
+        const vendors = await api(`/api/vendors?shop=${shop}`);
+
+        if (data.length === 0) {
+          document.getElementById('tab-products').innerHTML = `
+            <div class="card">
+              <h2>No products yet</h2>
+              <p style="color:#666">Click "Sync Products" to import your Shopify products.</p>
+              <button class="btn btn-primary" onclick="syncProducts()">⟳ Sync Now</button>
+            </div>
+          `;
+          return;
+        }
+
+        let html = `<div class="card"><h2>📦 ${data.length} Products</h2><table>
+          <tr><th>Product</th><th>SKU</th><th>Stock</th><th>Reorder Point</th><th>Vendor</th><th></th></tr>`;
+
+        for (const p of data) {
+          const badge = p.current_stock <= p.reorder_point && p.reorder_point > 0
+            ? `<span class="badge badge-danger">${p.current_stock}</span>`
+            : `<span class="badge badge-success">${p.current_stock}</span>`;
+
+          html += `<tr>
+            <td><strong>${p.title}</strong></td>
+            <td>${p.sku || '-'}</td>
+            <td>${badge}</td>
+            <td>${p.reorder_point > 0 ? p.reorder_point : '-'}</td>
+            <td>${p.vendor_name || '-'}</td>
+            <td><button class="btn btn-outline btn-sm" onclick="editProduct(${p.id})">Edit</button></td>
+          </tr>`;
+        }
+
+        html += '</table></div>';
+        document.getElementById('tab-products').innerHTML = html;
+      } catch (e) {
+        document.getElementById('tab-products').innerHTML = `<div class="error">Failed to load products</div>`;
+      }
+    }
+
+    async function editProduct(id) {
+      const data = await api(`/api/products?shop=${shop}`);
+      const vendors = await api(`/api/vendors?shop=${shop}`);
+      const p = data.find(x => x.id === id);
+      if (!p) return;
+
+      const modal = document.getElementById('modalContent');
+      modal.innerHTML = `
+        <h2>Edit: ${p.title}</h2>
+        <label>Reorder Point (alert when stock drops below)</label>
+        <input type="number" id="reorderPoint" value="${p.reorder_point || 0}" min="0">
+        <label>Preferred Vendor</label>
+        <select id="preferredVendor">
+          <option value="">None</option>
+          ${vendors.map(v => `<option value="${v.id}" ${v.id === p.preferred_vendor_id ? 'selected' : ''}>${v.name}</option>`).join('')}
+        </select>
+        <div class="btn-row">
+          <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="saveProduct(${id})">Save</button>
+        </div>
+      `;
+      document.getElementById('modalOverlay').classList.add('show');
+    }
+
+    async function saveProduct(id) {
+      const reorder_point = parseInt(document.getElementById('reorderPoint').value) || 0;
+      const preferred_vendor_id = document.getElementById('preferredVendor').value || null;
+      await api('/api/products/reorder-point', {
+        method: 'POST',
+        body: JSON.stringify({ id, reorder_point, preferred_vendor_id: preferred_vendor_id ? parseInt(preferred_vendor_id) : null }),
+      });
+      closeModal();
+      loadProducts();
+      loadLowStock();
+      loadStats();
+    }
+
+    // ─── Vendors ────────────────────────────────────────────────────
+
+    async function loadVendors() {
+      try {
+        const data = await api(`/api/vendors?shop=${shop}`);
+        let html = `<div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <h2 style="margin:0">🏢 Vendors</h2>
+            <button class="btn btn-primary" onclick="showAddVendor()">+ Add Vendor</button>
+          </div>`;
+
+        if (data.length === 0) {
+          html += `<p style="color:#666">No vendors yet. Add your suppliers so you can generate POs.</p>`;
+        } else {
+          html += `<table><tr><th>Name</th><th>Email</th><th>Min Order</th></tr>`;
+          for (const v of data) {
+            html += `<tr><td><strong>${v.name}</strong></td><td>${v.email}</td><td>${v.min_order_amount > 0 ? '$' + v.min_order_amount : '-'}</td></tr>`;
+          }
+          html += '</table>';
+        }
+
+        html += '</div>';
+        document.getElementById('tab-vendors').innerHTML = html;
+      } catch (e) {
+        document.getElementById('tab-vendors').innerHTML = `<div class="error">Failed to load vendors</div>`;
+      }
+    }
+
+    function showAddVendor() {
+      const modal = document.getElementById('modalContent');
+      modal.innerHTML = `
+        <h2>Add Vendor</h2>
+        <label>Vendor Name</label>
+        <input type="text" id="vendorName" placeholder="e.g. ABC Supplies">
+        <label>Email Address</label>
+        <input type="email" id="vendorEmail" placeholder="orders@abcsupplies.com">
+        <label>Minimum Order Amount ($, optional)</label>
+        <input type="number" id="vendorMin" placeholder="0" step="0.01">
+        <div class="btn-row">
+          <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="saveVendor()">Save</button>
+        </div>
+      `;
+      document.getElementById('modalOverlay').classList.add('show');
+    }
+
+    async function saveVendor() {
+      const name = document.getElementById('vendorName').value;
+      const email = document.getElementById('vendorEmail').value;
+      const min_order_amount = parseFloat(document.getElementById('vendorMin').value) || 0;
+      if (!name || !email) return alert('Name and email are required');
+      await api('/api/vendors', {
+        method: 'POST',
+        body: JSON.stringify({ shop, name, email, min_order_amount }),
+      });
+      closeModal();
+      loadVendors();
+    }
+
+    // ─── Purchase Orders ────────────────────────────────────────────
+
+    async function loadOrders() {
+      try {
+        const data = await api(`/api/purchase-orders?shop=${shop}`);
+        let html = `<div class="card">
+          <h2>📄 Purchase Orders</h2>`;
+
+        if (data.length === 0) {
+          html += `<p style="color:#666">No purchase orders yet. Create one from the Low Stock tab.</p>`;
+        } else {
+          html += `<table><tr><th>PO#</th><th>Vendor</th><th>Total</th><th>Status</th><th>Created</th></tr>`;
+          for (const po of data) {
+            const statusBadge = {
+              'draft': '<span class="badge badge-info">Draft</span>',
+              'sent': '<span class="badge badge-warning">Sent</span>',
+              'partial': '<span class="badge badge-warning">Partial</span>',
+              'received': '<span class="badge badge-success">Received</span>',
+            }[po.status] || `<span class="badge badge-info">${po.status}</span>`;
+
+            html += `<tr>
+              <td><strong>${po.po_number}</strong></td>
+              <td>${po.vendor_name}</td>
+              <td>$${Number(po.total).toFixed(2)}</td>
+              <td>${statusBadge}</td>
+              <td>${new Date(po.created_at).toLocaleDateString()}</td>
+            </tr>`;
+          }
+          html += '</table>';
+        }
+
+        html += '</div>';
+        document.getElementById('tab-orders').innerHTML = html;
+      } catch (e) {
+        document.getElementById('tab-orders').innerHTML = `<div class="error">Failed to load POs</div>`;
+      }
+    }
+
+    // ─── Create PO ──────────────────────────────────────────────────
+
+    async function createPOForProduct(productId) {
+      const products = await api(`/api/products?shop=${shop}`);
+      const vendors = await api(`/api/vendors?shop=${shop}`);
+      const p = products.find(x => x.id === productId);
+
+      const modal = document.getElementById('modalContent');
+      modal.innerHTML = `
+        <h2>Create Purchase Order</h2>
+        <p><strong>Product:</strong> ${p.title} (Stock: ${p.current_stock}, Reorder at: ${p.reorder_point})</p>
+        <label>Vendor</label>
+        <select id="poVendorId">
+          ${vendors.map(v => `<option value="${v.id}" ${v.id === p.preferred_vendor_id ? 'selected' : ''}>${v.name}</option>`).join('')}
+        </select>
+        <label>Quantity to order</label>
+        <input type="number" id="poQty" value="${Math.max(p.reorder_point - p.current_stock, 1)}" min="1">
+        <label>Unit cost ($, optional)</label>
+        <input type="number" id="poCost" value="${p.unit_cost || ''}" step="0.01">
+        <label>Notes (optional)</label>
+        <textarea id="poNotes" rows="2"></textarea>
+        <div class="btn-row">
+          <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-success" onclick="savePO(${p.id})">Create & Send</button>
+        </div>
+      `;
+      document.getElementById('modalOverlay').classList.add('show');
+    }
+
+    async function savePO(productId) {
+      const vendor_id = parseInt(document.getElementById('poVendorId').value);
+      const ordered_qty = parseInt(document.getElementById('poQty').value);
+      const unit_cost = parseFloat(document.getElementById('poCost').value) || 0;
+      const notes = document.getElementById('poNotes').value;
+
+      if (!vendor_id) return alert('Please select a vendor');
+      if (!ordered_qty || ordered_qty < 1) return alert('Please enter a valid quantity');
+
+      await api('/api/purchase-orders', {
+        method: 'POST',
+        body: JSON.stringify({
+          shop,
+          vendor_id,
+          items: [{ product_id: productId, ordered_qty, unit_cost }],
+          notes,
+        }),
+      });
+
+      closeModal();
+      loadOrders();
+      alert('Purchase order created! You can send it from the Orders tab.');
+    }
+
+    // ─── Sync ───────────────────────────────────────────────────────
+
+    async function syncProducts() {
+      try {
+        await api('/api/sync-products', {
+          method: 'POST',
+          body: JSON.stringify({ shop }),
+        });
+        loadProducts();
+        loadLowStock();
+        loadStats();
+        alert('Products synced successfully!');
+      } catch (e) {
+        alert('Sync failed. Check the server logs.');
+      }
+    }
+
+    // ─── Modal ──────────────────────────────────────────────────────
+
+    function closeModal() {
+      document.getElementById('modalOverlay').classList.remove('show');
+    }
+    document.getElementById('modalOverlay').addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) closeModal();
+    });
+
+    // ─── Init ───────────────────────────────────────────────────────
+
+    loadStats();
+    loadLowStock();
+  </script>
+</body>
+</html>
