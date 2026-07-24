@@ -38,36 +38,36 @@ app.get('/auth', async (req, res) => {
 
     // Validate shop exists before redirecting to Shopify's OAuth
   try {
-    const shopCheck = await axios.get(`https://${shop}/admin`, {
+    const shopCheck = await axios.get(`https://${shop}/admin/oauth/authorize?client_id=${SHOPIFY_API_KEY}&scope=read_products&redirect_uri=${APP_URL}/auth/callback&state=validate`, {
       timeout: 5000,
       maxRedirects: 0,
       validateStatus: () => true,
     });
-    const redirectsToShopify = shopCheck.headers.location?.includes('shopify.com');
-    if (redirectsToShopify || shopCheck.status >= 400) {
+    // Real store returns 303 (redirect to login). Fake store returns 404.
+    if (shopCheck.status === 404) {
       return res.send(`
-        <!DOCTYPE html><html><head><meta charset="UTF-8">
-        <title>Store not found</title>
-        <style>
-          body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px}
-          .card{background:white;border-radius:12px;padding:40px;box-shadow:0 2px 12px rgba(0,0,0,0.08);max-width:420px;width:100%;text-align:center}
-          h1{font-size:24px;color:#1a1a2e;margin:0 0 12px 0}
-          p{color:#666;margin:0 0 8px 0;font-size:15px;line-height:1.5}
-          .btn{display:inline-block;padding:12px 24px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;text-decoration:none;margin-top:16px}
-          .btn:hover{background:#2a2a4e}
-        </style>
-        </head><body>
-        <div class="card">
-          <h1>Store not found</h1>
-          <p>We couldn't find a Shopify store at <strong>${shop}</strong>.</p>
-          <p>Check the spelling and try again.</p>
-          <a class="btn" href="/">Try again</a>
-        </div>
-        </body></html>
-      `);
+      <!DOCTYPE html><html><head><meta charset="UTF-8">
+      <title>Store not found</title>
+      <style>
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px}
+        .card{background:white;border-radius:12px;padding:40px;box-shadow:0 2px 12px rgba(0,0,0,0.08);max-width:420px;width:100%;text-align:center}
+        h1{font-size:24px;color:#1a1a2e;margin:0 0 12px 0}
+        p{color:#666;margin:0 0 8px 0;font-size:15px;line-height:1.5}
+        .btn{display:inline-block;padding:12px 24px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;text-decoration:none;margin-top:16px}
+        .btn:hover{background:#2a2a4e}
+      </style>
+      </head><body>
+      <div class="card">
+        <h1>Store not found</h1>
+        <p>We couldn't find a Shopify store at <strong>${shop}</strong>.</p>
+        <p>Check the spelling and try again.</p>
+        <a class="btn" href="/">Try again</a>
+      </div>
+      </body></html>
+    `);
     }
   } catch {
-    // Network error — store likely doesn't exist
+    // Network error — store domain likely doesn't exist
     return res.send(`
       <!DOCTYPE html><html><head><meta charset="UTF-8">
       <title>Store not found</title>
