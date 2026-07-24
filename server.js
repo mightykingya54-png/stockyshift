@@ -36,7 +36,7 @@ app.get('/auth', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop parameter');
 
-  // Validate that the shop exists before redirecting to Shopify
+    // Validate shop exists before redirecting to Shopify's OAuth
   try {
     const shopCheck = await axios.get(`https://${shop}/admin`, {
       timeout: 5000,
