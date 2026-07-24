@@ -1,21 +1,22 @@
 const Database = require('better-sqlite3');
 const path = require('path');
+const crypto = require('crypto');
 
 const dbPath = process.env.DB_PATH || path.join(__dirname, 'stockyshift.db');
 const db = new Database(dbPath);
 
 // Enable WAL mode for better concurrent access
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 // ─── Schema ──────────────────────────────────────────────────────────────
-
-db.exec(`DROP TABLE IF EXISTS products;`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS merchants (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     shop TEXT UNIQUE NOT NULL,
     access_token TEXT NOT NULL,
+    email TEXT,
     installed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     uninstalled_at DATETIME,
     is_active INTEGER DEFAULT 1
@@ -80,5 +81,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_products_reorder ON products(shop, reorder_point, current_stock);
   CREATE INDEX IF NOT EXISTS idx_po_shop ON purchase_orders(shop, status);
 `);
+
+// Migration: add email column to merchants if upgrading from old schema
+try {
+  db.exec(`ALTER TABLE merchants ADD COLUMN email TEXT;`);
+} catch (_) { /* column already exists or table not yet created — safe */ }
 
 module.exports = db;

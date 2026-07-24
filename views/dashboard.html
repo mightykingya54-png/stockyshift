@@ -381,7 +381,7 @@
       const preferred_vendor_id = document.getElementById('preferredVendor').value || null;
       await api('/api/products/reorder-point', {
         method: 'POST',
-        body: JSON.stringify({ id, reorder_point, preferred_vendor_id: preferred_vendor_id ? parseInt(preferred_vendor_id) : null }),
+        body: JSON.stringify({ id, reorder_point, preferred_vendor_id: preferred_vendor_id ? parseInt(preferred_vendor_id) : null, shop }),
       });
       closeModal();
       loadProducts();

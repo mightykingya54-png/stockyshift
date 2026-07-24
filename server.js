@@ -7,19 +7,48 @@ const cron = require('node-cron');
 const db = require('./db');
 const { generatePO } = require('./lib/pdf');
 const { sendPOEmail } = require('./lib/email');
+const SqliteStore = require('better-sqlite3-session-store')(session);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ─── Middleware ───────────────────────────────────────────────────────────
 
-app.use(express.json());
+// Capture raw body for webhook HMAC verification
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    req.rawBody = buf.toString();
+  }
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
+  store: new SqliteStore({
+    client: db,
+    expired: {
+      clear: true,
+      intervalMs: 900000, // clean expired sessions every 15 min
+    },
+  }),
   secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
   resave: false,
   saveUninitialized: false,
+  cookie: { maxAge: 86400000 }, // 24 hours
 }));
+
+// ─── Shopify HMAC Verification ────────────────────────────────────────────
+
+function verifyWebhook(body, hmacHeader) {
+  if (!hmacHeader || !SHOPIFY_API_SECRET) return false;
+  const calculatedHmac = crypto
+    .createHmac('sha256', SHOPIFY_API_SECRET)
+    .update(body, 'utf8')
+    .digest('base64');
+  // Compare using Buffer in case of different string lengths
+  const expected = Buffer.from(calculatedHmac);
+  const actual = Buffer.from(hmacHeader);
+  if (expected.length !== actual.length) return false;
+  return crypto.timingSafeEqual(expected, actual);
+}
 
 // Serve static dashboard
 app.use(express.static('views'));
@@ -36,14 +65,14 @@ app.get('/auth', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop parameter');
 
-    // Validate shop exists before redirecting to Shopify's OAuth
+    // Validate shop exists before redirecting to Shopify
   try {
-    const shopCheck = await axios.get(`https://${shop}/admin/oauth/authorize?client_id=${SHOPIFY_API_KEY}&scope=read_products&redirect_uri=${APP_URL}/auth/callback&state=validate`, {
+    // Real store returns 401 (no auth, but exists). Fake store returns 404.
+    const shopCheck = await axios.get(`https://${shop}/admin/api/2024-04/shop.json`, {
       timeout: 5000,
       maxRedirects: 0,
       validateStatus: () => true,
     });
-    // Real store returns 303 (redirect to login). Fake store returns 404.
     if (shopCheck.status === 404) {
       return res.send(`
       <!DOCTYPE html><html><head><meta charset="UTF-8">
@@ -106,7 +135,7 @@ app.get('/auth', async (req, res) => {
 
 // Step 2: Handle OAuth callback
 app.get('/auth/callback', async (req, res) => {
-  const { shop, code, state, host } = req.query;
+  const { shop, code, state } = req.query;
 
   // Verify state
   if (state !== req.session.state) {
@@ -138,6 +167,19 @@ app.get('/auth/callback', async (req, res) => {
       ON CONFLICT(shop) DO UPDATE SET access_token = ?, is_active = 1, uninstalled_at = NULL
     `);
     stmt.run(shop, accessToken, accessToken);
+
+    // Fetch merchant email from Shopify API (async, non-blocking)
+    axios.get(`https://${shop}/admin/shop.json`, {
+      headers: { 'X-Shopify-Access-Token': accessToken },
+      timeout: 5000,
+    }).then(shopRes => {
+      const email = shopRes.data?.shop?.email;
+      if (email) {
+        db.prepare('UPDATE merchants SET email = ? WHERE shop = ?').run(email, shop);
+      }
+    }).catch(err => {
+      console.warn(`[OAuth] Could not fetch email for ${shop}: ${err.message}`);
+    });
 
     // Redirect merchant to the embedded app or dashboard
     res.redirect(`/?shop=${shop}`);
@@ -256,6 +298,7 @@ app.post('/api/sync-products', async (req, res) => {
         current_stock = excluded.current_stock
     `);
 
+    let variantCount = 0;
     const insertMany = db.transaction((prods) => {
       for (const product of prods) {
         for (const variant of product.variants) {
@@ -267,13 +310,14 @@ app.post('/api/sync-products', async (req, res) => {
             variant.sku || '',
             inventoryLevels[variant.inventory_item_id] || 0
           );
+          variantCount++;
         }
       }
     });
 
     insertMany(products);
 
-    res.json({ synced: products.length });
+    res.json({ synced: variantCount });
   } catch (err) {
     console.error('Sync error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Sync failed' });
@@ -314,12 +358,14 @@ app.get('/api/products', (req, res) => {
 
 // Update reorder point for a product
 app.post('/api/products/reorder-point', (req, res) => {
-  const { id, reorder_point, preferred_vendor_id } = req.body;
+  const { id, reorder_point, preferred_vendor_id, shop } = req.body;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   const stmt = db.prepare(`
-    UPDATE products SET reorder_point = ?, preferred_vendor_id = ? WHERE id = ?
+    UPDATE products SET reorder_point = ?, preferred_vendor_id = ? WHERE id = ? AND shop = ?
   `);
-  stmt.run(reorder_point || 0, preferred_vendor_id || null, id);
+  stmt.run(reorder_point || 0, preferred_vendor_id || null, id, shop);
 
   res.json({ success: true });
 });
@@ -438,9 +484,15 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
 // Receive against PO
 app.post('/api/purchase-orders/:id/receive', (req, res) => {
   const { id } = req.params;
-  const { items } = req.body; // [{line_item_id, received_qty}]
+  const { shop, items } = req.body; // [{line_item_id, received_qty}]
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
-  const token = db.transaction(() => {
+  // Verify PO belongs to this shop
+  const po = db.prepare('SELECT id FROM purchase_orders WHERE id = ? AND shop = ?').get(id, shop);
+  if (!po) return res.status(404).json({ error: 'PO not found' });
+
+  const receiveTx = db.transaction(() => {
     for (const item of items) {
       db.prepare(`
         UPDATE po_line_items SET received_qty = ? WHERE id = ? AND po_id = ?
@@ -460,6 +512,7 @@ app.post('/api/purchase-orders/:id/receive', (req, res) => {
     `).run(status, id);
   });
 
+  receiveTx();
   res.json({ success: true });
 });
 
@@ -499,7 +552,26 @@ cron.schedule('0 8 * * *', () => {
 
     if (lowStock.length > 0) {
       console.log(`[Cron] ${merchant.shop}: ${lowStock.length} products below reorder point`);
-      // In production: send a summary email to the merchant here
+      try {
+        const lowStockList = lowStock.map(p =>
+          `- ${p.product_name} (SKU: ${p.sku}) — Stock: ${p.current_stock}, Reorder at: ${p.reorder_point}`
+        ).join('\n');
+
+        const emailText = `StockyShift — Low Stock Alert for ${merchant.shop}\n\n` +
+          `The following products are below their reorder point:\n\n${lowStockList}\n\n` +
+          `Log in to StockyShift to create purchase orders:\n${process.env.APP_URL || 'https://stockyshift.onrender.com'}\n`;
+
+        const merchantInfo = db.prepare('SELECT email FROM merchants WHERE shop = ?').get(merchant.shop);
+        if (merchantInfo?.email) {
+          sendPOEmail({
+            to: merchantInfo.email,
+            subject: `Low Stock Alert — ${lowStock.length} products need reordering`,
+            text: emailText,
+          });
+        }
+      } catch (err) {
+        console.error(`[Cron] Failed to send alert for ${merchant.shop}: ${err.message}`);
+      }
     }
   }
 });
@@ -508,12 +580,20 @@ cron.schedule('0 8 * * *', () => {
 
 app.post('/webhooks/app/uninstalled', (req, res) => {
   const shop = req.headers['x-shopify-shop-domain'];
+  const hmac = req.headers['x-shopify-hmac-sha256'];
   if (!shop) return res.status(400).send('Missing shop');
+
+  // Verify HMAC to ensure this is a real Shopify webhook
+  if (!verifyWebhook(req.rawBody, hmac)) {
+    console.warn(`[Webhook] Invalid HMAC for uninstall from ${shop}`);
+    return res.status(401).send('Invalid HMAC');
+  }
 
   db.prepare(`
     UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = ?
   `).run(shop);
 
+  console.log(`[Webhook] ${shop} uninstalled StockyShift`);
   res.status(200).send('OK');
 });
 
