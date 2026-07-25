@@ -531,6 +531,25 @@ app.get('/api/purchase-orders', (req, res) => {
   res.json(pos);
 });
 
+// ─── Test Email (remove before production) ────────────────────────────────
+
+app.get('/api/test-email', async (req, res) => {
+  const { to } = req.query;
+  if (!to) return res.status(400).json({ error: 'Missing ?to=email' });
+
+  try {
+    await sendPOEmail({
+      to,
+      subject: 'StockyShift — Test Email',
+      text: 'This is a test email from StockyShift.\n\nIf you received this, SMTP is working correctly.',
+    });
+    res.json({ success: true, message: `Test email sent to ${to}` });
+  } catch (err) {
+    console.error('[TestEmail]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Cron Job: Daily Low Stock Check ─────────────────────────────────────
 
 // Run at 8:00 AM every day
