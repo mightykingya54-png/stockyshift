@@ -163,7 +163,51 @@
   </style>
 </head>
 <body>
-  <div class="header">
+  <!-- Trial banner (hidden by default) -->
+  <div id="trialBanner" class="hidden" style="background:#4a6cf7;color:white;text-align:center;padding:8px;font-size:13px;">
+    <span class="trial-text"></span>
+    <span style="margin-left:12px;opacity:0.8;">— cancel anytime</span>
+  </div>
+
+  <!-- Billing overlay (hidden by default) -->
+  <div id="billingOverlay" class="hidden" style="
+    position:fixed;top:0;left:0;right:0;bottom:0;background:#1a1a2e;
+    display:flex;align-items:center;justify-content:center;z-index:1000;
+  ">
+    <div style="text-align:center;color:white;max-width:440px;padding:24px;">
+      <h2 style="font-size:28px;margin-bottom:8px;">StockyShift</h2>
+      <p style="color:#a0a0b8;margin-bottom:20px;">
+        Purchase orders &amp; low stock alerts for Shopify merchants.
+      </p>
+      <div style="background:rgba(255,255,255,0.1);border-radius:12px;padding:20px;margin-bottom:20px;">
+        <div style="font-size:40px;font-weight:700;">$29</div>
+        <div style="color:#a0a0b8;font-size:14px;">per month — 7-day free trial</div>
+        <ul style="list-style:none;padding:0;margin:16px 0 0;text-align:left;font-size:14px;color:#ccc;">
+          <li style="padding:4px 0;">✅ Unlimited products &amp; vendors</li>
+          <li style="padding:4px 0;">✅ Unlimited purchase orders</li>
+          <li style="padding:4px 0;">✅ Low stock alerts &amp; email digests</li>
+          <li style="padding:4px 0;">✅ Email POs directly to suppliers</li>
+          <li style="padding:4px 0;">✅ No credit card required for trial</li>
+        </ul>
+      </div>
+      <div id="billingDeclined" class="hidden" style="background:#d32f2f;color:white;border-radius:8px;padding:10px;font-size:13px;margin-bottom:12px;">
+        Billing was cancelled. Start a trial to continue using StockyShift.
+      </div>
+      <button id="startTrialBtn" onclick="startTrial()"
+        style="background:#4a6cf7;color:white;border:none;padding:14px 40px;
+               border-radius:8px;font-size:16px;font-weight:600;cursor:pointer;
+               transition:background 0.15s;"
+        onmouseover="this.style.background='#3b5de7'"
+        onmouseout="this.style.background='#4a6cf7'"
+      >Start 7-Day Free Trial</button>
+      <p style="color:#666;font-size:12px;margin-top:12px;">
+        No credit card needed. Cancel anytime during trial.
+      </p>
+    </div>
+  </div>
+
+  <div id="appContent">
+    <div class="header">
     <div>
       <h1>StockyShift</h1>
       <span class="shop-name" id="shopName"></span>
@@ -201,10 +245,63 @@
     <div class="modal" id="modalContent"></div>
   </div>
 
+  </div><!-- /appContent -->
+
   <script>
     const urlParams = new URLSearchParams(window.location.search);
     const shop = urlParams.get('shop');
     document.getElementById('shopName').textContent = shop || '';
+
+    // ─── Billing check (runs before anything else) ──────────────────
+
+    async function checkBilling() {
+      if (!shop) return;
+      try {
+        const billing = await api(`/api/billing/status?shop=${shop}`);
+        if (billing.skip_billing) return; // dev mode
+
+        if (billing.status === 'not_installed') return;
+
+        if (billing.status === 'pending' || billing.status === 'expired' || billing.status === 'cancelled') {
+          // Show billing overlay
+          document.getElementById('appContent').classList.add('hidden');
+          document.getElementById('billingOverlay').classList.remove('hidden');
+          // Show declined message if they just came back from billing page
+          if (urlParams.get('billing') === 'declined') {
+            document.getElementById('billingDeclined').classList.remove('hidden');
+          }
+          return;
+        }
+
+        if (billing.status === 'trial' && billing.trial_days_left > 0) {
+          // Show trial banner
+          const banner = document.getElementById('trialBanner');
+          banner.classList.remove('hidden');
+          banner.querySelector('.trial-text').textContent =
+            `${billing.trial_days_left} day${billing.trial_days_left > 1 ? 's' : ''} left in your free trial`;
+        }
+      } catch (e) {
+        console.error('Billing check failed:', e);
+      }
+    }
+
+    // Start free trial
+    async function startTrial() {
+      const btn = document.getElementById('startTrialBtn');
+      btn.disabled = true;
+      btn.textContent = 'Redirecting...';
+      try {
+        const result = await api('/api/billing/create', {
+          method: 'POST',
+          body: JSON.stringify({ shop }),
+        });
+        window.location.href = result.confirmation_url;
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Start 7-Day Free Trial';
+        alert('Failed to start trial: ' + e.message);
+      }
+    }
 
     // ─── Tab switching ──────────────────────────────────────────────
 
@@ -567,8 +664,10 @@
 
     // ─── Init ───────────────────────────────────────────────────────
 
-    loadStats();
-    loadLowStock();
+    checkBilling().then(() => {
+      loadStats();
+      loadLowStock();
+    });
   </script>
 </body>
 </html>

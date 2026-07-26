@@ -550,6 +550,135 @@ app.get('/api/test-email', async (req, res) => {
   }
 });
 
+// ─── Billing (Shopify Billing API) ──────────────────────────────────────
+
+const BILLING_PLAN = {
+  name: 'StockyShift Monthly',
+  price: 29.00,
+  trial_days: 7,
+  return_url: `${APP_URL}/billing/confirm`,
+  test: process.env.NODE_ENV !== 'production',
+};
+
+// Check if billing is active (or in trial) for a shop
+function isBillingActive(merchant) {
+  if (process.env.SKIP_BILLING === 'true') return true;
+  if (!merchant) return false;
+  if (merchant.billing_status === 'active') return true;
+  if (merchant.billing_status === 'trial') {
+    // Check if trial hasn't expired
+    if (merchant.trial_ends_at) {
+      const trialEnd = new Date(merchant.trial_ends_at);
+      if (trialEnd > new Date()) return true;
+    }
+  }
+  return false;
+}
+
+// Create a Shopify billing charge and return confirmation URL
+async function createCharge(shop, token) {
+  const response = await axios.post(
+    `https://${shop}/admin/api/2024-04/recurring_application_charges.json`,
+    { recurring_application_charge: BILLING_PLAN },
+    { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+  );
+  return response.data.recurring_application_charge;
+}
+
+// Activate a Shopify billing charge
+async function activateCharge(shop, token, chargeId) {
+  const response = await axios.post(
+    `https://${shop}/admin/api/2024-04/recurring_application_charges/${chargeId}/activate.json`,
+    {},
+    { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+  );
+  return response.data.recurring_application_charge;
+}
+
+// Get billing status for the dashboard
+app.get('/api/billing/status', (req, res) => {
+  const { shop } = req.query;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+
+  const merchant = db.prepare('SELECT * FROM merchants WHERE shop = ?').get(shop);
+  if (!merchant) return res.json({ status: 'not_installed' });
+
+  if (process.env.SKIP_BILLING === 'true') {
+    return res.json({ status: 'active', plan: BILLING_PLAN.name, skip_billing: true });
+  }
+
+  // Calculate trial days remaining
+  let trialDaysLeft = 0;
+  if (merchant.trial_ends_at) {
+    trialDaysLeft = Math.max(0, Math.ceil((new Date(merchant.trial_ends_at) - new Date()) / 86400000));
+  }
+
+  res.json({
+    status: merchant.billing_status,
+    charge_id: merchant.shopify_charge_id,
+    trial_days_left: trialDaysLeft,
+    plan: BILLING_PLAN.name,
+    price: BILLING_PLAN.price,
+  });
+});
+
+// Initiate billing (create charge, redirect to Shopify)
+app.post('/api/billing/create', async (req, res) => {
+  const { shop } = req.body;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+
+  const token = getToken(shop);
+  if (!token) return res.status(401).json({ error: 'Not installed' });
+
+  try {
+    const charge = await createCharge(shop, token);
+    // Store charge ID
+    db.prepare('UPDATE merchants SET shopify_charge_id = ? WHERE shop = ?').run(String(charge.id), shop);
+    res.json({ confirmation_url: charge.confirmation_url });
+  } catch (err) {
+    console.error('[Billing] Create charge error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to create billing charge' });
+  }
+});
+
+// Callback from Shopify after merchant approves (or declines) billing
+app.get('/billing/confirm', async (req, res) => {
+  const { charge_id, shop } = req.query;
+  if (!shop) return res.status(400).send('Missing shop');
+
+  // Merchant declined billing — redirect back to dashboard with declined flag
+  if (!charge_id) {
+    return res.redirect(`/?shop=${shop}&billing=declined`);
+  }
+
+  const token = getToken(shop);
+  if (!token) return res.status(401).send('Not installed');
+
+  try {
+    const charge = await activateCharge(shop, token, charge_id);
+
+    // Calculate trial end date (7 days from now)
+    const trialEnd = new Date();
+    trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
+
+    const billingStatus = BILLING_PLAN.trial_days > 0 ? 'trial' : 'active';
+
+    db.prepare(`
+      UPDATE merchants
+      SET shopify_charge_id = ?, billing_status = ?, trial_ends_at = ?
+      WHERE shop = ?
+    `).run(String(charge.id), billingStatus, trialEnd.toISOString(), shop);
+
+    console.log(`[Billing] ${shop} subscribed — ${billingStatus} until ${trialEnd.toISOString()}`);
+
+    // Redirect to dashboard
+    res.redirect(`/?shop=${shop}`);
+  } catch (err) {
+    console.error('[Billing] Activate charge error:', err.response?.data || err.message);
+    res.status(500).send('Failed to activate billing. Please try again.');
+  }
+});
+
 // ─── Cron Job: Daily Low Stock Check ─────────────────────────────────────
 
 // Run at 8:00 AM every day

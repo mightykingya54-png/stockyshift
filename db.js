@@ -17,6 +17,9 @@ db.exec(`
     shop TEXT UNIQUE NOT NULL,
     access_token TEXT NOT NULL,
     email TEXT,
+    shopify_charge_id TEXT,
+    billing_status TEXT DEFAULT 'pending',
+    trial_ends_at DATETIME,
     installed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     uninstalled_at DATETIME,
     is_active INTEGER DEFAULT 1
@@ -82,9 +85,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_po_shop ON purchase_orders(shop, status);
 `);
 
-// Migration: add email column to merchants if upgrading from old schema
-try {
-  db.exec(`ALTER TABLE merchants ADD COLUMN email TEXT;`);
-} catch (_) { /* column already exists or table not yet created — safe */ }
+// Migrations: add columns to merchants if upgrading from old schema
+try { db.exec(`ALTER TABLE merchants ADD COLUMN email TEXT;`); } catch (_) {}
+try { db.exec(`ALTER TABLE merchants ADD COLUMN shopify_charge_id TEXT;`); } catch (_) {}
+try { db.exec(`ALTER TABLE merchants ADD COLUMN billing_status TEXT DEFAULT 'pending';`); } catch (_) {}
+try { db.exec(`ALTER TABLE merchants ADD COLUMN trial_ends_at DATETIME;`); } catch (_) {}
 
 module.exports = db;
