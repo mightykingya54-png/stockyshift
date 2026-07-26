@@ -560,7 +560,6 @@ const BILLING_PLAN = {
   price: 29.00,
   trial_days: 7,
   return_url: `${APP_URL}/billing/confirm`,
-  test: process.env.NODE_ENV !== 'production',
 };
 
 // Check if billing is active (or in trial) for a shop
@@ -580,11 +579,12 @@ function isBillingActive(merchant) {
 
 // GraphQL mutation to create a subscription
 const CREATE_SUBSCRIPTION_MUTATION = `
-  mutation AppSubscriptionCreate($name: String!, $returnUrl: URL!, $trialDays: Int!, $price: Decimal!) {
+  mutation AppSubscriptionCreate($name: String!, $returnUrl: URL!, $trialDays: Int!, $price: Decimal!, $test: Boolean!) {
     appSubscriptionCreate(
       name: $name
       returnUrl: $returnUrl
       trialDays: $trialDays
+      test: $test
       lineItems: [{
         plan: {
           appRecurringPricingDetails: {
@@ -617,6 +617,7 @@ async function createCharge(shop, token) {
         returnUrl: BILLING_PLAN.return_url,
         trialDays: BILLING_PLAN.trial_days,
         price: BILLING_PLAN.price,
+        test: process.env.NODE_ENV !== 'production',
       },
     },
     { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
