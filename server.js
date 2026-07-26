@@ -733,6 +733,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
     );
 
     const subscriptions = result.data?.data?.appSubscriptions?.edges || [];
+    const allSubs = subscriptions.map(e => ({ id: e.node.id, status: e.node.status }));
     const pending = subscriptions.filter(e => e.node.status === 'PENDING' || e.node.status === 'ACCEPTED');
 
     // Cancel each pending subscription via GraphQL
@@ -758,7 +759,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
       }
     }
 
-    res.json({ canceled, message: `Canceled ${canceled.length} pending subscriptions` });
+    res.json({ canceled, message: `Canceled ${canceled.length} pending subscriptions`, found_subs: allSubs });
   } catch (err) {
     console.error('[Billing] Cancel error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Failed to cancel subscriptions' });
