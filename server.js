@@ -575,25 +575,67 @@ function isBillingActive(merchant) {
   return false;
 }
 
-// Create a Shopify billing charge and return confirmation URL
+// GraphQL mutation to create a subscription
+const CREATE_SUBSCRIPTION_MUTATION = `
+  mutation AppSubscriptionCreate($name: String!, $returnUrl: URL!, $trialDays: Int!, $price: Decimal!) {
+    appSubscriptionCreate(
+      name: $name
+      returnUrl: $returnUrl
+      trialDays: $trialDays
+      lineItems: [{
+        plan: {
+          appRecurringPricingDetails: {
+            price: { amount: $price, currencyCode: USD }
+          }
+        }
+      }]
+    ) {
+      confirmationUrl
+      appSubscription {
+        id
+        status
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+// Create a Shopify billing subscription (GraphQL) and return confirmation URL
 async function createCharge(shop, token) {
   const response = await axios.post(
-    `https://${shop}/admin/api/2024-04/recurring_application_charges.json`,
-    { recurring_application_charge: BILLING_PLAN },
+    `https://${shop}/admin/api/2024-04/graphql.json`,
+    {
+      query: CREATE_SUBSCRIPTION_MUTATION,
+      variables: {
+        name: BILLING_PLAN.name,
+        returnUrl: BILLING_PLAN.return_url,
+        trialDays: BILLING_PLAN.trial_days,
+        price: BILLING_PLAN.price,
+      },
+    },
     { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
   );
-  return response.data.recurring_application_charge;
+
+  const data = response.data.data?.appSubscriptionCreate;
+  if (data?.userErrors?.length > 0) {
+    const err = data.userErrors.map(e => e.message).join('; ');
+    throw new Error(err);
+  }
+  if (!data?.confirmationUrl) {
+    throw new Error('No confirmation URL returned from Shopify');
+  }
+
+  return {
+    id: data.appSubscription.id,
+    confirmation_url: data.confirmationUrl,
+    status: data.appSubscription.status,
+  };
 }
 
-// Activate a Shopify billing charge
-async function activateCharge(shop, token, chargeId) {
-  const response = await axios.post(
-    `https://${shop}/admin/api/2024-04/recurring_application_charges/${chargeId}/activate.json`,
-    {},
-    { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
-  );
-  return response.data.recurring_application_charge;
-}
+// Activate is not needed for GraphQL — subscription auto-activates on approval
 
 // Get billing status for the dashboard
 app.get('/api/billing/status', (req, res) => {
@@ -657,11 +699,11 @@ app.post('/api/billing/create', async (req, res) => {
 
 // Callback from Shopify after merchant approves (or declines) billing
 app.get('/billing/confirm', async (req, res) => {
-  const { charge_id, shop } = req.query;
+  const { charge_id, shop, subscription_id } = req.query;
   if (!shop) return res.status(400).send('Missing shop');
 
   // Merchant declined billing — redirect back to dashboard with declined flag
-  if (!charge_id) {
+  if (!charge_id && !subscription_id) {
     return res.redirect(`/?shop=${shop}&billing=declined`);
   }
 
@@ -669,7 +711,8 @@ app.get('/billing/confirm', async (req, res) => {
   if (!token) return res.status(401).send('Not installed');
 
   try {
-    const charge = await activateCharge(shop, token, charge_id);
+    // With GraphQL, the subscription is already active when they return
+    const subId = subscription_id || charge_id;
 
     // Calculate trial end date (7 days from now)
     const trialEnd = new Date();
@@ -681,14 +724,14 @@ app.get('/billing/confirm', async (req, res) => {
       UPDATE merchants
       SET shopify_charge_id = ?, billing_status = ?, trial_ends_at = ?
       WHERE shop = ?
-    `).run(String(charge.id), billingStatus, trialEnd.toISOString(), shop);
+    `).run(String(subId), billingStatus, trialEnd.toISOString(), shop);
 
     console.log(`[Billing] ${shop} subscribed — ${billingStatus} until ${trialEnd.toISOString()}`);
 
     // Redirect to dashboard
     res.redirect(`/?shop=${shop}`);
   } catch (err) {
-    console.error('[Billing] Activate charge error:', err.response?.data || err.message);
+    console.error('[Billing] Confirm error:', err.message);
     res.status(500).send('Failed to activate billing. Please try again.');
   }
 });
