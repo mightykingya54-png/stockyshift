@@ -57,7 +57,7 @@ app.use(express.static('views'));
 
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
-const SCOPES = process.env.SCOPES || 'read_products,write_products,read_inventory,write_inventory';
+const SCOPES = process.env.SCOPES || 'read_products,write_products,read_inventory,write_inventory,write_recurring_charges';
 const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 
 // Step 1: Redirect merchant to Shopify authorization
@@ -636,8 +636,9 @@ app.post('/api/billing/create', async (req, res) => {
     db.prepare('UPDATE merchants SET shopify_charge_id = ? WHERE shop = ?').run(String(charge.id), shop);
     res.json({ confirmation_url: charge.confirmation_url });
   } catch (err) {
-    console.error('[Billing] Create charge error:', err.response?.data || err.message);
-    res.status(500).json({ error: 'Failed to create billing charge' });
+    const detail = err.response?.data || err.message;
+    console.error('[Billing] Create charge error:', JSON.stringify(detail));
+    res.status(500).json({ error: typeof detail === 'string' ? detail : detail.errors || JSON.stringify(detail) });
   }
 });
 
