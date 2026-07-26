@@ -724,7 +724,35 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
   if (!token) return res.status(401).json({ error: 'Not installed' });
 
   try {
-    // Query existing subscriptions via GraphQL
+    // First, try to cancel the charge we know about from the DB
+    const merchant = db.prepare('SELECT shopify_charge_id FROM merchants WHERE shop = ?').get(shop);
+    const dbChargeId = merchant?.shopify_charge_id;
+
+    const canceled = [];
+    const allSubs = [];
+
+    // If we have a stored charge_id, try to cancel it directly
+    if (dbChargeId) {
+      try {
+        const cancelResult = await axios.post(
+          `https://${shop}/admin/api/2024-04/graphql.json`,
+          {
+            query: `mutation { appSubscriptionCancel(id: "${dbChargeId}") { userErrors { field message } } }`,
+          },
+          { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+        );
+        const errors = cancelResult.data?.data?.appSubscriptionCancel?.userErrors || [];
+        if (errors.length > 0) {
+          console.log(`Could not cancel ${dbChargeId}:`, errors.map(e => e.message).join('; '));
+        } else {
+          canceled.push(dbChargeId.split('/').pop());
+        }
+      } catch (e) {
+        console.log(`Could not cancel subscription ${dbChargeId}:`, e.message);
+      }
+    }
+
+    // Also query existing subscriptions via GraphQL for diagnostics
     const query = `{ appSubscriptions(first:10) { edges { node { id status } } } }`;
     const result = await axios.post(
       `https://${shop}/admin/api/2024-04/graphql.json`,
@@ -733,33 +761,40 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
     );
 
     const subscriptions = result.data?.data?.appSubscriptions?.edges || [];
-    const allSubs = subscriptions.map(e => ({ id: e.node.id, status: e.node.status }));
-    const pending = subscriptions.filter(e => e.node.status === 'PENDING' || e.node.status === 'ACCEPTED');
+    const foundSubs = subscriptions.map(e => ({ id: e.node.id, status: e.node.status }));
 
-    // Cancel each pending subscription via GraphQL
-    const canceled = [];
-    for (const sub of pending) {
-      const id = sub.node.id;
-      try {
-        const cancelResult = await axios.post(
-          `https://${shop}/admin/api/2024-04/graphql.json`,
-          {
-            query: `mutation { appSubscriptionCancel(id: "${id}") { userErrors { field message } } }`,
-          },
-          { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
-        );
-        const errors = cancelResult.data?.data?.appSubscriptionCancel?.userErrors || [];
-        if (errors.length > 0) {
-          console.log(`Could not cancel ${id}:`, errors.map(e => e.message).join('; '));
-        } else {
-          canceled.push(id.split('/').pop());
+    // Cancel any additional pending subs found via the query
+    for (const sub of subscriptions) {
+      if (sub.node.status === 'PENDING' || sub.node.status === 'ACCEPTED') {
+        const id = sub.node.id;
+        if (!dbChargeId || id !== dbChargeId) { // skip if already tried above
+          try {
+            const cancelResult = await axios.post(
+              `https://${shop}/admin/api/2024-04/graphql.json`,
+              {
+                query: `mutation { appSubscriptionCancel(id: "${id}") { userErrors { field message } } }`,
+              },
+              { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+            );
+            const errors = cancelResult.data?.data?.appSubscriptionCancel?.userErrors || [];
+            if (errors.length > 0) {
+              console.log(`Could not cancel ${id}:`, errors.map(e => e.message).join('; '));
+            } else {
+              canceled.push(id.split('/').pop());
+            }
+          } catch (e) {
+            console.log(`Could not cancel subscription ${id}:`, e.message);
+          }
         }
-      } catch (e) {
-        console.log(`Could not cancel subscription ${id}:`, e.message);
       }
     }
 
-    res.json({ canceled, message: `Canceled ${canceled.length} pending subscriptions`, found_subs: allSubs });
+    // Clear charge_id from DB if we canceled successfully
+    if (canceled.length > 0) {
+      db.prepare('UPDATE merchants SET shopify_charge_id = NULL, billing_status = NULL WHERE shop = ?').run(shop);
+    }
+
+    res.json({ canceled, message: `Canceled ${canceled.length} pending subscriptions`, db_charge_id: dbChargeId, found_subs: foundSubs });
   } catch (err) {
     console.error('[Billing] Cancel error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Failed to cancel subscriptions' });
