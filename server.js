@@ -593,7 +593,7 @@ async function createCharge(shop, token) {
         returnUrl: BILLING_PLAN.return_url,
         trialDays: BILLING_PLAN.trial_days,
         price: BILLING_PLAN.price,
-        test: process.env.NODE_ENV !== 'production',
+        test: process.env.BILLING_TEST_MODE === 'true',
       },
     },
     { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }

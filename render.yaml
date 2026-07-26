@@ -33,3 +33,5 @@ services:
         sync: false
       - key: DB_PATH
         sync: false
+      - key: BILLING_TEST_MODE
+        value: "true"
