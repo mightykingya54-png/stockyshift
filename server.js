@@ -715,6 +715,47 @@ app.get('/billing/confirm', async (req, res) => {
   }
 });
 
+// ─── Cancel pending subscriptions (for stuck billing) ─────────────────────
+app.post('/api/billing/cancel-pending', async (req, res) => {
+  const { shop } = req.body;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const token = getToken(shop);
+  if (!token) return res.status(401).json({ error: 'Not installed' });
+
+  try {
+    // Query existing subscriptions via GraphQL
+    const query = `{ appSubscriptions(first:10) { edges { node { id status } } } }`;
+    const result = await axios.post(
+      `https://${shop}/admin/api/2024-04/graphql.json`,
+      { query },
+      { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+    );
+
+    const subscriptions = result.data?.data?.appSubscriptions?.edges || [];
+    const pending = subscriptions.filter(e => e.node.status === 'PENDING' || e.node.status === 'ACCEPTED');
+
+    // Cancel each pending subscription via REST API
+    const canceled = [];
+    for (const sub of pending) {
+      const id = sub.node.id.split('/').pop();
+      try {
+        await axios.delete(
+          `https://${shop}/admin/api/2024-04/recurring_application_charges/${id}.json`,
+          { headers: { 'X-Shopify-Access-Token': token } }
+        );
+        canceled.push(id);
+      } catch (e) {
+        console.log(`Could not delete charge ${id}:`, e.message);
+      }
+    }
+
+    res.json({ canceled, message: `Canceled ${canceled.length} pending subscriptions` });
+  } catch (err) {
+    console.error('[Billing] Cancel error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to cancel subscriptions' });
+  }
+});
+
 // ─── Debug: check which API key is active ────────────────────────────────
 app.get('/api/debug', (req, res) => {
   const key = process.env.SHOPIFY_API_KEY || 'NOT SET';
