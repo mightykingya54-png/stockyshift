@@ -198,47 +198,22 @@ app.get('/auth/callback', async (req, res) => {
 app.get('/', (req, res) => {
   const { shop } = req.query;
   if (!shop) {
-    return res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>StockyShift</title>
-      <style>
-        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px}
-        .card{background:white;border-radius:12px;padding:40px;box-shadow:0 2px 12px rgba(0,0,0,0.08);max-width:420px;width:100%;text-align:center}
-        h1{font-size:28px;color:#1a1a2e;margin:0 0 8px 0}
-        p{color:#666;margin:0 0 24px 0;font-size:15px;line-height:1.5}
-        input{width:100%;padding:12px 16px;border:1px solid #ddd;border-radius:8px;font-size:15px;margin-bottom:12px;box-sizing:border-box}
-        input:focus{outline:none;border-color:#4a6cf7}
-        button{width:100%;padding:12px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
-        button:hover{background:#2a2a4e}
-        .hint{color:#999;font-size:13px;margin-top:8px}
-      </style>
-      </head>
-      <body>
-      <div class="card">
-        <h1>StockyShift</h1>
-        <p>Purchase orders &amp; low stock alerts for Shopify. The simple Stocky alternative.</p>
-        <input type="text" id="shopInput" placeholder="your-store.myshopify.com" onkeydown="if(event.key==='Enter')install()">
-        <button onclick="install()">Install on your store</button>
-        <p class="hint">Enter your Shopify store name above</p>
-      </div>
-      <script>
-        function install(){const s=document.getElementById('shopInput').value.trim();if(!s)return alert('Enter your store name');window.location.href='/auth?shop='+encodeURIComponent(s.endsWith('.myshopify.com')?s:s+'.myshopify.com')}
-      </script>
-      </body>
-      </html>
-    `);
+    return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
   }
 
-  // Check if merchant exists and has active session
+  // Check if merchant exists
   const merchant = db.prepare('SELECT * FROM merchants WHERE shop = ? AND is_active = 1').get(shop);
   if (!merchant) {
     return res.redirect(`/auth?shop=${shop}`);
   }
 
-  // Serve the dashboard HTML (passed as query param so JS can use it)
-  res.redirect(`/dashboard.html?shop=${shop}`);
+  // If SKIP_BILLING is true, force billing status to active
+  if (process.env.SKIP_BILLING === 'true') {
+    db.prepare(`UPDATE merchants SET billing_status = 'active' WHERE shop = ?`).run(shop);
+  }
+
+  // Send the dashboard HTML directly (NOT a redirect) so Shopify can't intercept
+  res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
 });
 
 // ─── API Routes ──────────────────────────────────────────────────────────
