@@ -638,7 +638,15 @@ app.post('/api/billing/create', async (req, res) => {
   } catch (err) {
     const detail = err.response?.data || err.message;
     console.error('[Billing] Create charge error:', JSON.stringify(detail));
-    res.status(500).json({ error: typeof detail === 'string' ? detail : detail.errors || JSON.stringify(detail) });
+    // Always return a string for the error
+    let errorMsg = typeof detail === 'string' ? detail : '';
+    if (!errorMsg && detail.errors) {
+      errorMsg = Array.isArray(detail.errors) ? detail.errors.join('; ') : String(detail.errors);
+    }
+    if (!errorMsg) {
+      try { errorMsg = JSON.stringify(detail); } catch (_) { errorMsg = 'Unknown error'; }
+    }
+    res.status(500).json({ error: errorMsg });
   }
 });
 
