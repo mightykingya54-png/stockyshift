@@ -336,7 +336,11 @@
         headers: { 'Content-Type': 'application/json' },
         ...opts,
       });
-      if (!res.ok) throw new Error(`API error: ${res.status}`);
+      if (!res.ok) {
+        let detail = '';
+        try { const body = await res.json(); detail = body.error || JSON.stringify(body); } catch (_) {}
+        throw new Error(detail || `API error: ${res.status}`);
+      }
       return res.json();
     }
 
