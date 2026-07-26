@@ -171,8 +171,8 @@
 
   <!-- Billing overlay (hidden by default) -->
   <div id="billingOverlay" class="hidden" style="
-    position:fixed;top:0;left:0;right:0;bottom:0;background:#1a1a2e;
-    display:flex;align-items:center;justify-content:center;z-index:1000;
+    display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#1a1a2e;
+    align-items:center;justify-content:center;z-index:1000;
   ">
     <div style="text-align:center;color:white;max-width:440px;padding:24px;">
       <h2 style="font-size:28px;margin-bottom:8px;">StockyShift</h2>
@@ -265,7 +265,9 @@
         if (billing.status === 'pending' || billing.status === 'expired' || billing.status === 'cancelled') {
           // Show billing overlay
           document.getElementById('appContent').classList.add('hidden');
-          document.getElementById('billingOverlay').classList.remove('hidden');
+          const ol = document.getElementById('billingOverlay');
+          ol.style.display = 'flex';
+          ol.classList.remove('hidden');
           // Show declined message if they just came back from billing page
           if (urlParams.get('billing') === 'declined') {
             document.getElementById('billingDeclined').classList.remove('hidden');
