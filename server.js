@@ -128,7 +128,8 @@ app.get('/auth', async (req, res) => {
     `client_id=${SHOPIFY_API_KEY}` +
     `&scope=${SCOPES}` +
     `&redirect_uri=${redirectUri}` +
-    `&state=${state}`;
+    `&state=${state}` +
+    `&grant_options[]=per-user`;
 
   res.redirect(installUrl);
 });
@@ -148,7 +149,7 @@ app.get('/auth/callback', async (req, res) => {
   }
 
   try {
-    // Exchange code for permanent access token
+    // Exchange code for access token
     const tokenResponse = await axios.post(
       `https://${shop}/admin/oauth/access_token`,
       {
@@ -158,7 +159,9 @@ app.get('/auth/callback', async (req, res) => {
       }
     );
 
-    const accessToken = tokenResponse.data.access_token;
+    const tokenData = tokenResponse.data;
+    console.log(`[OAuth] Token response for ${shop}:`, JSON.stringify(tokenData));
+    const accessToken = tokenData.access_token;
 
     // Store merchant in database
     const stmt = db.prepare(`
