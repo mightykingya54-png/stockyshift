@@ -735,18 +735,26 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
     const subscriptions = result.data?.data?.appSubscriptions?.edges || [];
     const pending = subscriptions.filter(e => e.node.status === 'PENDING' || e.node.status === 'ACCEPTED');
 
-    // Cancel each pending subscription via REST API
+    // Cancel each pending subscription via GraphQL
     const canceled = [];
     for (const sub of pending) {
-      const id = sub.node.id.split('/').pop();
+      const id = sub.node.id;
       try {
-        await axios.delete(
-          `https://${shop}/admin/api/2024-04/recurring_application_charges/${id}.json`,
-          { headers: { 'X-Shopify-Access-Token': token } }
+        const cancelResult = await axios.post(
+          `https://${shop}/admin/api/2024-04/graphql.json`,
+          {
+            query: `mutation { appSubscriptionCancel(id: "${id}") { userErrors { field message } } }`,
+          },
+          { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
         );
-        canceled.push(id);
+        const errors = cancelResult.data?.data?.appSubscriptionCancel?.userErrors || [];
+        if (errors.length > 0) {
+          console.log(`Could not cancel ${id}:`, errors.map(e => e.message).join('; '));
+        } else {
+          canceled.push(id.split('/').pop());
+        }
       } catch (e) {
-        console.log(`Could not delete charge ${id}:`, e.message);
+        console.log(`Could not cancel subscription ${id}:`, e.message);
       }
     }
 
@@ -765,6 +773,7 @@ app.get('/api/debug', (req, res) => {
     api_key_length: key.length,
     app_url: APP_URL,
     skip_billing: process.env.SKIP_BILLING,
+    billing_test_mode: process.env.BILLING_TEST_MODE,
     node_env: process.env.NODE_ENV,
   });
 });
