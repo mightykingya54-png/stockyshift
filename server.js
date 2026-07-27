@@ -652,6 +652,19 @@ app.post('/api/billing/create', async (req, res) => {
   const token = getToken(shop);
   if (!token) return res.status(401).json({ error: 'Not installed' });
 
+  // BILLING_TEST_MODE: skip Shopify's billing API, activate locally
+  if (process.env.BILLING_TEST_MODE === 'true') {
+    const trialEnd = new Date();
+    trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
+    db.prepare(`
+      UPDATE merchants SET billing_status = 'trial', trial_ends_at = ?, shopify_charge_id = NULL
+      WHERE shop = ?
+    `).run(trialEnd.toISOString(), shop);
+    console.log(`[Billing] TEST MODE: ${shop} activated with ${BILLING_PLAN.trial_days}d trial`);
+    // Return a URL that immediately redirects back to the dashboard
+    return res.json({ confirmation_url: `${APP_URL}/billing/test-confirm?shop=${shop}` });
+  }
+
   try {
     const charge = await createCharge(shop, token);
     // Store charge ID
@@ -675,6 +688,14 @@ app.post('/api/billing/create', async (req, res) => {
     }
     res.status(500).json({ error: errorMsg });
   }
+});
+
+// Billing test confirm (simulated approval for BILLING_TEST_MODE)
+app.get('/billing/test-confirm', async (req, res) => {
+  const { shop } = req.query;
+  if (!shop) return res.status(400).send('Missing shop');
+  // Already activated by /api/billing/create, just redirect to dashboard
+  res.redirect(`/?shop=${shop}`);
 });
 
 // Callback from Shopify after merchant approves (or declines) billing
