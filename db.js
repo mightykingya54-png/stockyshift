@@ -4,7 +4,15 @@ const DATABASE_URL = process.env.DATABASE_URL;
 
 let pool;
 if (DATABASE_URL) {
-  pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  // Log partial URL for debugging (mask password)
+  const masked = DATABASE_URL.replace(/\/\/.*:.*@/, '//user:***@');
+  console.log('[DB] Connecting to:', masked);
+  pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 10000,
+  });
 } else {
   // Fallback: use SQLite for local dev
   const Database = require('better-sqlite3');
@@ -228,7 +236,8 @@ async function initSchema() {
   try { await pool.query('ALTER TABLE merchants ADD COLUMN trial_ends_at TIMESTAMP'); } catch (_) {}
 }
 
-// Run schema init
+// Run schema init (with logging)
+console.log('[DB] PostgreSQL connecting with timeout 5s...');
 const schemaPromise = initSchema().then(() => {
   console.log('[DB] PostgreSQL schema initialized successfully');
 }).catch(err => {
