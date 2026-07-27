@@ -176,6 +176,20 @@ app.get('/auth/callback', async (req, res) => {
     `);
     stmt.run(shop, accessToken, accessToken);
 
+    // Register uninstall webhook (async, non-blocking)
+    axios.post(`https://${shop}/admin/api/2024-04/graphql.json`, {
+      query: `mutation {
+        webhookSubscriptionCreate(topic: APP_UNINSTALLED, webhookSubscription: {
+          callbackUrl: "${APP_URL}/webhooks/app/uninstalled"
+          format: JSON
+        }) { userErrors { field message } }
+      }`
+    }, {
+      headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' }
+    }).catch(err => {
+      console.warn(`[Webhook] Could not register APP_UNINSTALLED for ${shop}: ${err.message}`);
+    });
+
     // Fetch merchant email from Shopify API (async, non-blocking)
     axios.get(`https://${shop}/admin/shop.json`, {
       headers: { 'X-Shopify-Access-Token': accessToken },
@@ -201,9 +215,15 @@ app.get('/auth/callback', async (req, res) => {
 
 // Serve the dashboard for any root request with a shop parameter
 app.get('/', (req, res) => {
-  const { shop } = req.query;
+  const { shop, reauth } = req.query;
   if (!shop) {
     return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
+  }
+
+  // Force re-auth if ?reauth=1 (deletes shop from DB, triggers fresh OAuth)
+  if (reauth === '1') {
+    db.prepare('DELETE FROM merchants WHERE shop = ?').run(shop);
+    return res.redirect(`/auth?shop=${shop}`);
   }
 
   // Check if merchant exists
