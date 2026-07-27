@@ -858,7 +858,23 @@ app.get('/api/debug', (req, res) => {
     billing_test_mode: process.env.BILLING_TEST_MODE,
     scopes: process.env.SCOPES,
     node_env: process.env.NODE_ENV,
+    has_database_url: !!process.env.DATABASE_URL,
   });
+});
+
+// Database health check (with 5s timeout)
+app.get('/api/db-health', async (req, res) => {
+  const timeout = setTimeout(() => {
+    res.status(500).json({ error: 'Database connection timed out after 5s' });
+  }, 5000);
+  try {
+    const result = await db.get('SELECT 1 AS ok');
+    clearTimeout(timeout);
+    res.json({ connected: true, result });
+  } catch (err) {
+    clearTimeout(timeout);
+    res.status(500).json({ connected: false, error: err.message });
+  }
 });
 
 // ─── Cron Job: Daily Low Stock Check ─────────────────────────────────────
