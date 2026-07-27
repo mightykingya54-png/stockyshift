@@ -95,10 +95,18 @@ try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN trial_ends_at DATETIME;`);
 // so server.js can use await db.get(...) / await db.all(...) etc.
 
 function toSqlite(sql, params) {
-  if (!params || params.length === 0) return { sql, params };
-  // Convert $N style params to ? for SQLite
-  const converted = sql.replace(/\$(\d+)/g, () => '?');
-  return { sql: converted, params };
+  if (!params || params.length === 0) return { sql, params: [] };
+  // Map $N references to actual array indices, building expanded params
+  const expanded = [];
+  const converted = sql.replace(/\$(\d+)/g, (_, n) => {
+    const idx = parseInt(n) - 1;
+    if (idx >= 0 && idx < params.length) {
+      expanded.push(params[idx]);
+      return '?';
+    }
+    return `$${n}`; // leave as-is if out of range (shouldn't happen)
+  });
+  return { sql: converted, params: expanded };
 }
 
 const db = {
