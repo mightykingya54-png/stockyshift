@@ -857,6 +857,7 @@ app.get('/api/debug', (req, res) => {
     app_url: APP_URL,
     skip_billing: process.env.SKIP_BILLING,
     billing_test_mode: process.env.BILLING_TEST_MODE,
+    scopes: process.env.SCOPES,
     node_env: process.env.NODE_ENV,
   });
 });
