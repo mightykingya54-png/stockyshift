@@ -302,8 +302,10 @@ app.post('/api/sync-products', async (req, res) => {
 
     res.json({ synced: variantCount });
   } catch (err) {
-    console.error('Sync error:', err.response?.data || err.message);
-    res.status(500).json({ error: 'Sync failed' });
+    const detail = err.response?.data || err.message;
+    const raw = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
+    console.error('Sync error:', raw);
+    res.status(500).json({ error: 'Sync failed', detail: raw.substring(0, 500) });
   }
 });
 
