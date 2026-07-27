@@ -11,8 +11,14 @@ const { sendPOEmail } = require('./lib/email');
 // Session store: PostgreSQL if DATABASE_URL is set, otherwise SQLite for local dev
 let SessionStore;
 if (process.env.DATABASE_URL) {
-  const PgSession = require('connect-pg-simple')(session);
-  SessionStore = new PgSession({ conString: process.env.DATABASE_URL, createTableIfMissing: true });
+  try {
+    const PgSession = require('connect-pg-simple')(session);
+    SessionStore = new PgSession({ conString: process.env.DATABASE_URL, createTableIfMissing: true });
+    console.log('[Session] Using PostgreSQL session store');
+  } catch (e) {
+    console.error('[Session] PostgreSQL session store failed, falling back to MemoryStore:', e.message);
+    SessionStore = new session.MemoryStore();
+  }
 } else {
   const SqliteStore = require('better-sqlite3-session-store')(session);
   SessionStore = new SqliteStore({

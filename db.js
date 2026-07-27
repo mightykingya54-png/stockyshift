@@ -229,8 +229,10 @@ async function initSchema() {
 }
 
 // Run schema init
-const schemaPromise = initSchema().catch(err => {
-  console.error('[DB] Schema init failed:', err.message);
+const schemaPromise = initSchema().then(() => {
+  console.log('[DB] PostgreSQL schema initialized successfully');
+}).catch(err => {
+  console.error('[DB] Schema init failed:', err.message, err.stack?.substring(0, 500));
 });
 
 // ─── Async DB Wrapper ─────────────────────────────────────────────────────
