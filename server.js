@@ -8,24 +8,12 @@ const cron = require('node-cron');
 const db = require('./db');
 const { generatePO } = require('./lib/pdf');
 const { sendPOEmail } = require('./lib/email');
-// Session store: PostgreSQL if DATABASE_URL is set, otherwise SQLite for local dev
-let SessionStore;
-if (process.env.DATABASE_URL) {
-  try {
-    const PgSession = require('connect-pg-simple')(session);
-    SessionStore = new PgSession({ conString: process.env.DATABASE_URL, createTableIfMissing: true });
-    console.log('[Session] Using PostgreSQL session store');
-  } catch (e) {
-    console.error('[Session] PostgreSQL session store failed, falling back to MemoryStore:', e.message);
-    SessionStore = new session.MemoryStore();
-  }
-} else {
-  const SqliteStore = require('better-sqlite3-session-store')(session);
-  SessionStore = new SqliteStore({
-    client: db,
-    expired: { clear: true, intervalMs: 900000 },
-  });
-}
+// Session store: SQLite (synchronous, persistent file)
+const SqliteStore = require('better-sqlite3-session-store')(session);
+const SessionStore = new SqliteStore({
+  client: require('better-sqlite3')(process.env.DB_PATH || path.join(__dirname, 'stockyshift_sessions.db')),
+  expired: { clear: true, intervalMs: 900000 },
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -858,22 +846,21 @@ app.get('/api/debug', (req, res) => {
     billing_test_mode: process.env.BILLING_TEST_MODE,
     scopes: process.env.SCOPES,
     node_env: process.env.NODE_ENV,
-    has_database_url: !!process.env.DATABASE_URL,
   });
 });
 
 // Database health check (with 5s timeout)
 app.get('/api/db-health', async (req, res) => {
-  const timeout = setTimeout(() => {
-    res.status(500).json({ error: 'Database connection timed out after 5s' });
+  const failTimer = setTimeout(() => {
+    if (!res.headersSent) res.status(500).json({ error: 'Database connection timed out after 5s' });
   }, 5000);
   try {
     const result = await db.get('SELECT 1 AS ok');
-    clearTimeout(timeout);
-    res.json({ connected: true, result });
+    clearTimeout(failTimer);
+    if (!res.headersSent) res.json({ connected: true, result });
   } catch (err) {
-    clearTimeout(timeout);
-    res.status(500).json({ connected: false, error: err.message });
+    clearTimeout(failTimer);
+    if (!res.headersSent) res.status(500).json({ connected: false, error: err.message });
   }
 });
 
