@@ -120,9 +120,10 @@ app.get('/auth', async (req, res) => {
     `);
   }
 
-  const state = crypto.randomBytes(16).toString('hex');
-  req.session.state = state;
-  req.session.shop = shop;
+  // Stateless state: HMAC-based, no session storage needed
+  const state = crypto.createHmac('sha256', SHOPIFY_API_SECRET)
+    .update(shop)
+    .digest('hex');
 
   const redirectUri = `${APP_URL}/auth/callback`;
   const installUrl = `https://${shop}/admin/oauth/authorize?` +
@@ -139,8 +140,11 @@ app.get('/auth', async (req, res) => {
 app.get('/auth/callback', async (req, res) => {
   const { shop, code, state } = req.query;
 
-  // Verify state
-  if (state !== req.session.state) {
+  // Stateless state verification (HMAC-based, no session dependency)
+  const expectedState = crypto.createHmac('sha256', SHOPIFY_API_SECRET)
+    .update(shop)
+    .digest('hex');
+  if (state !== expectedState) {
     return res.status(403).send('State mismatch. Possible CSRF attack.');
   }
 
