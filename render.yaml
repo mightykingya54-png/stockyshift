@@ -31,6 +31,8 @@ services:
         sync: false
       - key: FROM_EMAIL
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: DB_PATH
         sync: false
       - key: BILLING_TEST_MODE

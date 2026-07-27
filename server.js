@@ -8,7 +8,18 @@ const cron = require('node-cron');
 const db = require('./db');
 const { generatePO } = require('./lib/pdf');
 const { sendPOEmail } = require('./lib/email');
-const SqliteStore = require('better-sqlite3-session-store')(session);
+// Session store: PostgreSQL if DATABASE_URL is set, otherwise SQLite for local dev
+let SessionStore;
+if (process.env.DATABASE_URL) {
+  const PgSession = require('connect-pg-simple')(session);
+  SessionStore = new PgSession({ conString: process.env.DATABASE_URL, createTableIfMissing: true });
+} else {
+  const SqliteStore = require('better-sqlite3-session-store')(session);
+  SessionStore = new SqliteStore({
+    client: db,
+    expired: { clear: true, intervalMs: 900000 },
+  });
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,13 +34,7 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
-  store: new SqliteStore({
-    client: db,
-    expired: {
-      clear: true,
-      intervalMs: 900000, // clean expired sessions every 15 min
-    },
-  }),
+  store: SessionStore,
   secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
   resave: false,
   saveUninitialized: false,
@@ -169,12 +174,11 @@ app.get('/auth/callback', async (req, res) => {
     const accessToken = tokenData.access_token;
 
     // Store merchant in database
-    const stmt = db.prepare(`
+    await db.run(`
       INSERT INTO merchants (shop, access_token)
-      VALUES (?, ?)
-      ON CONFLICT(shop) DO UPDATE SET access_token = ?, is_active = 1, uninstalled_at = NULL
-    `);
-    stmt.run(shop, accessToken, accessToken);
+      VALUES ($1, $2)
+      ON CONFLICT(shop) DO UPDATE SET access_token = $2, is_active = 1, uninstalled_at = NULL
+    `, [shop, accessToken]);
 
     // Register uninstall webhook (async, non-blocking)
     axios.post(`https://${shop}/admin/api/2024-04/graphql.json`, {
@@ -194,10 +198,10 @@ app.get('/auth/callback', async (req, res) => {
     axios.get(`https://${shop}/admin/shop.json`, {
       headers: { 'X-Shopify-Access-Token': accessToken },
       timeout: 5000,
-    }).then(shopRes => {
+    }).then(async shopRes => {
       const email = shopRes.data?.shop?.email;
       if (email) {
-        db.prepare('UPDATE merchants SET email = ? WHERE shop = ?').run(email, shop);
+        await db.run('UPDATE merchants SET email = $1 WHERE shop = $2', [email, shop]);
       }
     }).catch(err => {
       console.warn(`[OAuth] Could not fetch email for ${shop}: ${err.message}`);
@@ -214,45 +218,49 @@ app.get('/auth/callback', async (req, res) => {
 // ─── Embedded App Entry ──────────────────────────────────────────────────
 
 // Serve the dashboard for any root request with a shop parameter
-app.get('/', (req, res) => {
-  const { shop, reauth } = req.query;
-  if (!shop) {
-    return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
-  }
+app.get('/', async (req, res, next) => {
+  try {
+    const { shop, reauth } = req.query;
+    if (!shop) {
+      return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
+    }
 
-  // Force re-auth if ?reauth=1 (deletes shop from DB, triggers fresh OAuth)
-  if (reauth === '1') {
-    db.prepare('DELETE FROM merchants WHERE shop = ?').run(shop);
-    return res.redirect(`/auth?shop=${shop}`);
-  }
+    // Force re-auth if ?reauth=1 (deletes shop from DB, triggers fresh OAuth)
+    if (reauth === '1') {
+      await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+      return res.redirect(`/auth?shop=${shop}`);
+    }
 
-  // Check if merchant exists
-  const merchant = db.prepare('SELECT * FROM merchants WHERE shop = ? AND is_active = 1').get(shop);
-  if (!merchant) {
-    return res.redirect(`/auth?shop=${shop}`);
-  }
+    // Check if merchant exists
+    const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
+    if (!merchant) {
+      return res.redirect(`/auth?shop=${shop}`);
+    }
 
-  // If SKIP_BILLING is true, force billing status to active
-  if (process.env.SKIP_BILLING === 'true') {
-    db.prepare(`UPDATE merchants SET billing_status = 'active' WHERE shop = ?`).run(shop);
-  }
+    // If SKIP_BILLING is true, force billing status to active
+    if (process.env.SKIP_BILLING === 'true') {
+      await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
+    }
 
-  // Send the dashboard HTML directly (NOT a redirect) so Shopify can't intercept
-  res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
+    // Send the dashboard HTML directly (NOT a redirect) so Shopify can't intercept
+    res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
+  } catch (e) {
+    next(e);
+  }
 });
 
 // ─── API Routes ──────────────────────────────────────────────────────────
 
 // Helper: load merchant's access token
-function getToken(shop) {
-  const merchant = db.prepare('SELECT access_token FROM merchants WHERE shop = ? AND is_active = 1').get(shop);
+async function getToken(shop) {
+  const merchant = await db.get('SELECT access_token FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
   return merchant?.access_token;
 }
 
 // Sync products from Shopify
 app.post('/api/sync-products', async (req, res) => {
   const { shop } = req.body;
-  const token = getToken(shop);
+  const token = await getToken(shop);
   if (!token) return res.status(401).json({ error: 'Shop not installed' });
 
   try {
@@ -292,33 +300,22 @@ app.post('/api/sync-products', async (req, res) => {
     }
 
     // Upsert products into local DB
-    const upsert = db.prepare(`
-      INSERT INTO products (shopify_product_id, shopify_variant_id, shop, title, sku, current_stock)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(shop, shopify_variant_id) DO UPDATE SET
-        title = excluded.title,
-        sku = excluded.sku,
-        current_stock = excluded.current_stock
-    `);
-
     let variantCount = 0;
-    const insertMany = db.transaction((prods) => {
-      for (const product of prods) {
+    await db.transaction(async (tx) => {
+      for (const product of products) {
         for (const variant of product.variants) {
-          upsert.run(
-            product.id,
-            variant.id,
-            shop,
-            product.title,
-            variant.sku || '',
-            inventoryLevels[variant.inventory_item_id] || 0
-          );
+          await tx.run(`
+            INSERT INTO products (shopify_product_id, shopify_variant_id, shop, title, sku, current_stock)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT(shop, shopify_variant_id) DO UPDATE SET
+              title = excluded.title,
+              sku = excluded.sku,
+              current_stock = excluded.current_stock
+          `, [product.id, variant.id, shop, product.title, variant.sku || '', inventoryLevels[variant.inventory_item_id] || 0]);
           variantCount++;
         }
       }
     });
-
-    insertMany(products);
 
     res.json({ synced: variantCount });
   } catch (err) {
@@ -330,68 +327,69 @@ app.post('/api/sync-products', async (req, res) => {
 });
 
 // Get low stock products (below reorder point)
-app.get('/api/low-stock', (req, res) => {
+app.get('/api/low-stock', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
   // Join products with vendors to show vendor info alongside low stock items
-  const lowStock = db.prepare(`
+  const lowStock = await db.all(`
     SELECT p.*, v.name as vendor_name, v.email as vendor_email
     FROM products p
     LEFT JOIN vendors v ON p.preferred_vendor_id = v.id
-    WHERE p.shop = ?
+    WHERE p.shop = $1
       AND p.is_active = 1
       AND p.reorder_point > 0
       AND p.current_stock <= p.reorder_point
     ORDER BY (p.reorder_point - p.current_stock) DESC
-  `).all(shop);
+  `, [shop]);
 
   res.json(lowStock);
 });
 
 // Get all products
-app.get('/api/products', (req, res) => {
+app.get('/api/products', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
-  const products = db.prepare(`
-    SELECT * FROM products WHERE shop = ? AND is_active = 1 ORDER BY title
-  `).all(shop);
+  const products = await db.all(`
+    SELECT * FROM products WHERE shop = $1 AND is_active = 1 ORDER BY title
+  `, [shop]);
 
   res.json(products);
 });
 
 // Update reorder point for a product
-app.post('/api/products/reorder-point', (req, res) => {
+app.post('/api/products/reorder-point', async (req, res) => {
   const { id, reorder_point, preferred_vendor_id, shop } = req.body;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
-  if (!getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
-  const stmt = db.prepare(`
-    UPDATE products SET reorder_point = ?, preferred_vendor_id = ? WHERE id = ? AND shop = ?
-  `);
-  stmt.run(reorder_point || 0, preferred_vendor_id || null, id, shop);
+  await db.run(`
+    UPDATE products SET reorder_point = $1, preferred_vendor_id = $2 WHERE id = $3 AND shop = $4
+  `, [reorder_point || 0, preferred_vendor_id || null, id, shop]);
 
   res.json({ success: true });
 });
 
 // ─── Vendor Routes ───────────────────────────────────────────────────────
 
-app.get('/api/vendors', (req, res) => {
+app.get('/api/vendors', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
-  const vendors = db.prepare('SELECT * FROM vendors WHERE shop = ? ORDER BY name').all(shop);
+  const vendors = await db.all('SELECT * FROM vendors WHERE shop = $1 ORDER BY name', [shop]);
   res.json(vendors);
 });
 
-app.post('/api/vendors', (req, res) => {
+app.post('/api/vendors', async (req, res) => {
   const { shop, name, email, min_order_amount, notes } = req.body;
   if (!shop || !name || !email) return res.status(400).json({ error: 'Missing required fields' });
 
-  const stmt = db.prepare('INSERT INTO vendors (shop, name, email, min_order_amount, notes) VALUES (?, ?, ?, ?, ?)');
-  const result = stmt.run(shop, name, email, min_order_amount || 0, notes || '');
-  res.json({ id: result.lastInsertRowid });
+  const result = await db.get(
+    'INSERT INTO vendors (shop, name, email, min_order_amount, notes) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+    [shop, name, email, min_order_amount || 0, notes || '']
+  );
+  res.json({ id: result.id });
 });
 
 // ─── PO Routes ───────────────────────────────────────────────────────────
@@ -413,27 +411,23 @@ app.post('/api/purchase-orders', async (req, res) => {
     total += item.ordered_qty * (item.unit_cost || 0);
   }
 
-  const insertPO = db.transaction(() => {
-    const poResult = db.prepare(`
+  const poId = await db.transaction(async (tx) => {
+    const poResult = await tx.get(`
       INSERT INTO purchase_orders (shop, vendor_id, po_number, total, notes)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(shop, vendor_id, poNumber, total, notes || '');
+      VALUES ($1, $2, $3, $4, $5) RETURNING id
+    `, [shop, vendor_id, poNumber, total, notes || '']);
 
-    const poId = poResult.lastInsertRowid;
-
-    const insertItem = db.prepare(`
-      INSERT INTO po_line_items (po_id, product_id, ordered_qty, unit_cost)
-      VALUES (?, ?, ?, ?)
-    `);
+    const newPoId = poResult.id;
 
     for (const item of items) {
-      insertItem.run(poId, item.product_id, item.ordered_qty, item.unit_cost || 0);
+      await tx.run(`
+        INSERT INTO po_line_items (po_id, product_id, ordered_qty, unit_cost)
+        VALUES ($1, $2, $3, $4)
+      `, [newPoId, item.product_id, item.ordered_qty, item.unit_cost || 0]);
     }
 
-    return poId;
+    return newPoId;
   });
-
-  const poId = insertPO();
   res.json({ po_id: poId, po_number: poNumber, total });
 });
 
@@ -443,21 +437,21 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
   const { shop } = req.body;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
-  const po = db.prepare(`
+  const po = await db.get(`
     SELECT po.*, v.name as vendor_name, v.email as vendor_email
     FROM purchase_orders po
     JOIN vendors v ON po.vendor_id = v.id
-    WHERE po.id = ? AND po.shop = ?
-  `).get(id, shop);
+    WHERE po.id = $1 AND po.shop = $2
+  `, [id, shop]);
 
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
-  const lineItems = db.prepare(`
+  const lineItems = await db.all(`
     SELECT pli.*, p.title, p.sku
     FROM po_line_items pli
     JOIN products p ON pli.product_id = p.id
-    WHERE pli.po_id = ?
-  `).all(id);
+    WHERE pli.po_id = $1
+  `, [id]);
 
   try {
     // Generate PDF
@@ -475,9 +469,9 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
     });
 
     // Mark as sent
-    db.prepare(`
-      UPDATE purchase_orders SET status = 'sent', emailed_at = CURRENT_TIMESTAMP WHERE id = ?
-    `).run(id);
+    await db.run(`
+      UPDATE purchase_orders SET status = 'sent', emailed_at = CURRENT_TIMESTAMP WHERE id = $1
+    `, [id]);
 
     res.json({ success: true });
   } catch (err) {
@@ -487,51 +481,50 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
 });
 
 // Receive against PO
-app.post('/api/purchase-orders/:id/receive', (req, res) => {
+app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const { id } = req.params;
   const { shop, items } = req.body; // [{line_item_id, received_qty}]
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
-  if (!getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   // Verify PO belongs to this shop
-  const po = db.prepare('SELECT id FROM purchase_orders WHERE id = ? AND shop = ?').get(id, shop);
+  const po = await db.get('SELECT id FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
-  const receiveTx = db.transaction(() => {
+  await db.transaction(async (tx) => {
     for (const item of items) {
-      db.prepare(`
-        UPDATE po_line_items SET received_qty = ? WHERE id = ? AND po_id = ?
-      `).run(item.received_qty, item.line_item_id, id);
+      await tx.run(`
+        UPDATE po_line_items SET received_qty = $1 WHERE id = $2 AND po_id = $3
+      `, [item.received_qty, item.line_item_id, id]);
     }
 
     // Check if all items are fully received
-    const allItems = db.prepare(`
-      SELECT ordered_qty, received_qty FROM po_line_items WHERE po_id = ?
-    `).all(id);
+    const allItems = await tx.all(`
+      SELECT ordered_qty, received_qty FROM po_line_items WHERE po_id = $1
+    `, [id]);
 
     const allReceived = allItems.every(i => i.received_qty >= i.ordered_qty);
     const status = allReceived ? 'received' : 'partial';
 
-    db.prepare(`
-      UPDATE purchase_orders SET status = ?, received_at = CURRENT_TIMESTAMP WHERE id = ?
-    `).run(status, id);
+    await tx.run(`
+      UPDATE purchase_orders SET status = $1, received_at = CURRENT_TIMESTAMP WHERE id = $2
+    `, [status, id]);
   });
 
-  receiveTx();
   res.json({ success: true });
 });
 
-app.get('/api/purchase-orders', (req, res) => {
+app.get('/api/purchase-orders', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
-  const pos = db.prepare(`
+  const pos = await db.all(`
     SELECT po.*, v.name as vendor_name
     FROM purchase_orders po
     JOIN vendors v ON po.vendor_id = v.id
-    WHERE po.shop = ?
+    WHERE po.shop = $1
     ORDER BY po.created_at DESC
-  `).all(shop);
+  `, [shop]);
 
   res.json(pos);
 });
@@ -644,11 +637,11 @@ async function createCharge(shop, token) {
 // Activate is not needed for GraphQL — subscription auto-activates on approval
 
 // Get billing status for the dashboard
-app.get('/api/billing/status', (req, res) => {
+app.get('/api/billing/status', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
-  const merchant = db.prepare('SELECT * FROM merchants WHERE shop = ?').get(shop);
+  const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1', [shop]);
   if (!merchant) return res.json({ status: 'not_installed' });
 
   if (process.env.SKIP_BILLING === 'true') {
@@ -682,10 +675,10 @@ app.post('/api/billing/create', async (req, res) => {
   if (process.env.BILLING_TEST_MODE === 'true') {
     const trialEnd = new Date();
     trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
-    db.prepare(`
-      UPDATE merchants SET billing_status = 'trial', trial_ends_at = ?, shopify_charge_id = NULL
-      WHERE shop = ?
-    `).run(trialEnd.toISOString(), shop);
+    await db.run(`
+      UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, shopify_charge_id = NULL
+      WHERE shop = $2
+    `, [trialEnd.toISOString(), shop]);
     console.log(`[Billing] TEST MODE: ${shop} activated with ${BILLING_PLAN.trial_days}d trial`);
     // Return a URL that immediately redirects back to the dashboard
     return res.json({ confirmation_url: `${APP_URL}/billing/test-confirm?shop=${shop}` });
@@ -694,7 +687,7 @@ app.post('/api/billing/create', async (req, res) => {
   try {
     const charge = await createCharge(shop, token);
     // Store charge ID
-    db.prepare('UPDATE merchants SET shopify_charge_id = ? WHERE shop = ?').run(String(charge.id), shop);
+    await db.run('UPDATE merchants SET shopify_charge_id = $1 WHERE shop = $2', [String(charge.id), shop]);
     res.json({ confirmation_url: charge.confirmation_url });
   } catch (err) {
     const detail = err.response?.data || err.message;
@@ -734,7 +727,7 @@ app.get('/billing/confirm', async (req, res) => {
     return res.redirect(`/?shop=${shop}&billing=declined`);
   }
 
-  const token = getToken(shop);
+  const token = await getToken(shop);
   if (!token) return res.status(401).send('Not installed');
 
   try {
@@ -747,11 +740,11 @@ app.get('/billing/confirm', async (req, res) => {
 
     const billingStatus = BILLING_PLAN.trial_days > 0 ? 'trial' : 'active';
 
-    db.prepare(`
+    await db.run(`
       UPDATE merchants
-      SET shopify_charge_id = ?, billing_status = ?, trial_ends_at = ?
-      WHERE shop = ?
-    `).run(String(subId), billingStatus, trialEnd.toISOString(), shop);
+      SET shopify_charge_id = $1, billing_status = $2, trial_ends_at = $3
+      WHERE shop = $4
+    `, [String(subId), billingStatus, trialEnd.toISOString(), shop]);
 
     console.log(`[Billing] ${shop} subscribed — ${billingStatus} until ${trialEnd.toISOString()}`);
 
@@ -767,12 +760,12 @@ app.get('/billing/confirm', async (req, res) => {
 app.post('/api/billing/cancel-pending', async (req, res) => {
   const { shop } = req.body;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
-  const token = getToken(shop);
+  const token = await getToken(shop);
   if (!token) return res.status(401).json({ error: 'Not installed' });
 
   try {
     // First, try to cancel the charge we know about from the DB
-    const merchant = db.prepare('SELECT shopify_charge_id FROM merchants WHERE shop = ?').get(shop);
+    const merchant = await db.get('SELECT shopify_charge_id FROM merchants WHERE shop = $1', [shop]);
     const dbChargeId = merchant?.shopify_charge_id;
 
     const canceled = [];
@@ -838,7 +831,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
 
     // Clear charge_id from DB if we canceled successfully
     if (canceled.length > 0) {
-      db.prepare('UPDATE merchants SET shopify_charge_id = NULL, billing_status = NULL WHERE shop = ?').run(shop);
+      await db.run('UPDATE merchants SET shopify_charge_id = NULL, billing_status = NULL WHERE shop = $1', [shop]);
     }
 
     res.json({ canceled, message: `Canceled ${canceled.length} pending subscriptions`, db_charge_id: dbChargeId, found_subs: foundSubs });
@@ -865,51 +858,54 @@ app.get('/api/debug', (req, res) => {
 // ─── Cron Job: Daily Low Stock Check ─────────────────────────────────────
 
 // Run at 8:00 AM every day
-cron.schedule('0 8 * * *', () => {
+cron.schedule('0 8 * * *', async () => {
   console.log('[Cron] Running daily low stock check...');
+  try {
+    const merchants = await db.all('SELECT shop, access_token FROM merchants WHERE is_active = 1');
 
-  const merchants = db.prepare('SELECT shop, access_token FROM merchants WHERE is_active = 1').all();
+    for (const merchant of merchants) {
+      const lowStock = await db.all(`
+        SELECT p.*, v.name as vendor_name
+        FROM products p
+        LEFT JOIN vendors v ON p.preferred_vendor_id = v.id
+        WHERE p.shop = $1
+          AND p.is_active = 1
+          AND p.reorder_point > 0
+          AND p.current_stock <= p.reorder_point
+      `, [merchant.shop]);
 
-  for (const merchant of merchants) {
-    const lowStock = db.prepare(`
-      SELECT p.*, v.name as vendor_name
-      FROM products p
-      LEFT JOIN vendors v ON p.preferred_vendor_id = v.id
-      WHERE p.shop = ?
-        AND p.is_active = 1
-        AND p.reorder_point > 0
-        AND p.current_stock <= p.reorder_point
-    `).all(merchant.shop);
+      if (lowStock.length > 0) {
+        console.log(`[Cron] ${merchant.shop}: ${lowStock.length} products below reorder point`);
+        try {
+          const lowStockList = lowStock.map(p =>
+            `- ${p.product_name} (SKU: ${p.sku}) — Stock: ${p.current_stock}, Reorder at: ${p.reorder_point}`
+          ).join('\n');
 
-    if (lowStock.length > 0) {
-      console.log(`[Cron] ${merchant.shop}: ${lowStock.length} products below reorder point`);
-      try {
-        const lowStockList = lowStock.map(p =>
-          `- ${p.product_name} (SKU: ${p.sku}) — Stock: ${p.current_stock}, Reorder at: ${p.reorder_point}`
-        ).join('\n');
+          const emailText = `StockyShift — Low Stock Alert for ${merchant.shop}\n\n` +
+            `The following products are below their reorder point:\n\n${lowStockList}\n\n` +
+            `Log in to StockyShift to create purchase orders:\n${process.env.APP_URL || 'https://stockyshift.onrender.com'}\n`;
 
-        const emailText = `StockyShift — Low Stock Alert for ${merchant.shop}\n\n` +
-          `The following products are below their reorder point:\n\n${lowStockList}\n\n` +
-          `Log in to StockyShift to create purchase orders:\n${process.env.APP_URL || 'https://stockyshift.onrender.com'}\n`;
-
-        const merchantInfo = db.prepare('SELECT email FROM merchants WHERE shop = ?').get(merchant.shop);
-        if (merchantInfo?.email) {
-          sendPOEmail({
-            to: merchantInfo.email,
-            subject: `Low Stock Alert — ${lowStock.length} products need reordering`,
-            text: emailText,
-          });
+          const merchantInfo = await db.get('SELECT email FROM merchants WHERE shop = $1', [merchant.shop]);
+          if (merchantInfo?.email) {
+            await sendPOEmail({
+              to: merchantInfo.email,
+              subject: `Low Stock Alert — ${lowStock.length} products need reordering`,
+              text: emailText,
+            });
+          }
+        } catch (err) {
+          console.error(`[Cron] Failed to send alert for ${merchant.shop}: ${err.message}`);
         }
-      } catch (err) {
-        console.error(`[Cron] Failed to send alert for ${merchant.shop}: ${err.message}`);
       }
     }
+  } catch (err) {
+    console.error('[Cron] Error:', err.message);
   }
 });
 
 // ─── Webhook: Handle app uninstall ───────────────────────────────────────
 
-app.post('/webhooks/app/uninstalled', (req, res) => {
+app.post('/webhooks/app/uninstalled', async (req, res) => {
   const shop = req.headers['x-shopify-shop-domain'];
   const hmac = req.headers['x-shopify-hmac-sha256'];
   if (!shop) return res.status(400).send('Missing shop');
@@ -920,9 +916,9 @@ app.post('/webhooks/app/uninstalled', (req, res) => {
     return res.status(401).send('Invalid HMAC');
   }
 
-  db.prepare(`
-    UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = ?
-  `).run(shop);
+  await db.run(`
+    UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = $1
+  `, [shop]);
 
   console.log(`[Webhook] ${shop} uninstalled StockyShift`);
   res.status(200).send('OK');
