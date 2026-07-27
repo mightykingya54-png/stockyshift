@@ -58,7 +58,7 @@ app.use(express.static('views'));
 
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
-const SCOPES = process.env.SCOPES || 'read_products,write_products,read_inventory,write_inventory,write_recurring_charges';
+const SCOPES = process.env.SCOPES || 'read_products,write_products,read_inventory,write_inventory';
 const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 
 // Step 1: Redirect merchant to Shopify authorization
