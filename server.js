@@ -20,6 +20,20 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Middleware ───────────────────────────────────────────────────────────
 
+// ─── Security Headers (App Store requirement, embedded-app compatible) ─────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // Embedded apps MUST be frameable by Shopify admin
+  // Use CSP frame-ancestors (modern) instead of X-Frame-Options (deprecated for this use case)
+  if (req.query.shop) {
+    res.setHeader('Content-Security-Policy', `frame-ancestors https://${req.query.shop} https://admin.shopify.com;`);
+  } else {
+    res.setHeader('X-Frame-Options', 'DENY');
+  }
+  next();
+});
+
 // Capture raw body for webhook HMAC verification
 app.use(express.json({
   verify: (req, _res, buf) => {
@@ -280,16 +294,26 @@ app.post('/api/sync-products', async (req, res) => {
     const variantIds = products.flatMap(p => p.variants.map(v => v.inventory_item_id)).filter(Boolean);
     let inventoryLevels = {};
     if (variantIds.length > 0) {
-      // Fetch in chunks of 50 (Shopify limit for inventory_levels)
+      // Fetch in chunks of 50 (Shopify limit for inventory_levels query params)
       for (let i = 0; i < variantIds.length; i += 50) {
         const chunk = variantIds.slice(i, i + 50).join(',');
-        const invResponse = await axios.get(
-          `https://${shop}/admin/api/2024-04/inventory_levels.json?inventory_item_ids=${chunk}`,
-          { headers: { 'X-Shopify-Access-Token': token } }
-        );
-        invResponse.data.inventory_levels.forEach(level => {
-          inventoryLevels[level.inventory_item_id] = level.available;
-        });
+        let invUrl = `https://${shop}/admin/api/2024-04/inventory_levels.json?inventory_item_ids=${chunk}&limit=250`;
+        while (invUrl) {
+          const invResponse = await axios.get(invUrl, {
+            headers: { 'X-Shopify-Access-Token': token },
+          });
+          // Sum across locations (multi-location stores have one row per location per item)
+          invResponse.data.inventory_levels.forEach(level => {
+            inventoryLevels[level.inventory_item_id] = (inventoryLevels[level.inventory_item_id] || 0) + level.available;
+          });
+          // Follow pagination for inventory levels
+          invUrl = null;
+          const linkHeader = invResponse.headers.link;
+          if (linkHeader) {
+            const matches = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+            if (matches) invUrl = matches[1];
+          }
+        }
       }
     }
 
@@ -378,6 +402,7 @@ app.get('/api/vendors', async (req, res) => {
 app.post('/api/vendors', async (req, res) => {
   const { shop, name, email, min_order_amount, notes } = req.body;
   if (!shop || !name || !email) return res.status(400).json({ error: 'Missing required fields' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   const result = await db.get(
     'INSERT INTO vendors (shop, name, email, min_order_amount, notes) VALUES ($1, $2, $3, $4, $5) RETURNING id',
@@ -395,6 +420,10 @@ app.post('/api/purchase-orders', async (req, res) => {
   if (!shop || !vendor_id || !items?.length) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+  // Verify vendor belongs to this shop
+  const vendorCheck = await db.get('SELECT id FROM vendors WHERE id = $1 AND shop = $2', [vendor_id, shop]);
+  if (!vendorCheck) return res.status(400).json({ error: 'Vendor not found' });
 
   // Generate PO number
   const poNumber = `PO-${Date.now().toString(36).toUpperCase()}`;
@@ -430,6 +459,7 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
   const { id } = req.params;
   const { shop } = req.body;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   const po = await db.get(`
     SELECT po.*, v.name as vendor_name, v.email as vendor_email
@@ -523,24 +553,26 @@ app.get('/api/purchase-orders', async (req, res) => {
   res.json(pos);
 });
 
-// ─── Test Email (remove before production) ────────────────────────────────
+// ─── Test Email (dev only) ────────────────────────────────────────────────
 
-app.get('/api/test-email', async (req, res) => {
-  const { to } = req.query;
-  if (!to) return res.status(400).json({ error: 'Missing ?to=email' });
+if (process.env.NODE_ENV !== 'production') {
+  app.get('/api/test-email', async (req, res) => {
+    const { to } = req.query;
+    if (!to) return res.status(400).json({ error: 'Missing ?to=email' });
 
-  try {
-    await sendPOEmail({
-      to,
-      subject: 'StockyShift — Test Email',
-      text: 'This is a test email from StockyShift.\n\nIf you received this, SMTP is working correctly.',
-    });
-    res.json({ success: true, message: `Test email sent to ${to}` });
-  } catch (err) {
-    console.error('[TestEmail]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+    try {
+      await sendPOEmail({
+        to,
+        subject: 'StockyShift — Test Email',
+        text: 'This is a test email from StockyShift.\n\nIf you received this, SMTP is working correctly.',
+      });
+      res.json({ success: true, message: `Test email sent to ${to}` });
+    } catch (err) {
+      console.error('[TestEmail]', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+}
 
 // ─── Billing (Shopify Billing API) ──────────────────────────────────────
 
@@ -662,7 +694,7 @@ app.post('/api/billing/create', async (req, res) => {
   const { shop } = req.body;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
-  const token = getToken(shop);
+  const token = await getToken(shop);
   if (!token) return res.status(401).json({ error: 'Not installed' });
 
   // BILLING_TEST_MODE: skip Shopify's billing API, activate locally
@@ -835,7 +867,8 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
   }
 });
 
-// ─── Debug: check which API key is active ────────────────────────────────
+// ─── Debug: check which API key is active (dev only) ─────────────────────
+if (process.env.NODE_ENV !== 'production') {
 app.get('/api/debug', (req, res) => {
   const key = process.env.SHOPIFY_API_KEY || 'NOT SET';
   res.json({
@@ -848,6 +881,7 @@ app.get('/api/debug', (req, res) => {
     node_env: process.env.NODE_ENV,
   });
 });
+}
 
 // Database health check (with 5s timeout)
 app.get('/api/db-health', async (req, res) => {
@@ -887,7 +921,7 @@ cron.schedule('0 8 * * *', async () => {
         console.log(`[Cron] ${merchant.shop}: ${lowStock.length} products below reorder point`);
         try {
           const lowStockList = lowStock.map(p =>
-            `- ${p.product_name} (SKU: ${p.sku}) — Stock: ${p.current_stock}, Reorder at: ${p.reorder_point}`
+            `- ${p.title} (SKU: ${p.sku}) — Stock: ${p.current_stock}, Reorder at: ${p.reorder_point}`
           ).join('\n');
 
           const emailText = `StockyShift — Low Stock Alert for ${merchant.shop}\n\n` +
@@ -925,11 +959,14 @@ app.post('/webhooks/app/uninstalled', async (req, res) => {
     return res.status(401).send('Invalid HMAC');
   }
 
-  await db.run(`
-    UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = $1
-  `, [shop]);
+  // Delete merchant data for privacy compliance (GDPR / App Store review)
+  await db.run('DELETE FROM po_line_items WHERE po_id IN (SELECT id FROM purchase_orders WHERE shop = $1)', [shop]);
+  await db.run('DELETE FROM purchase_orders WHERE shop = $1', [shop]);
+  await db.run('DELETE FROM products WHERE shop = $1', [shop]);
+  await db.run('DELETE FROM vendors WHERE shop = $1', [shop]);
+  await db.run('UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = $1', [shop]);
 
-  console.log(`[Webhook] ${shop} uninstalled StockyShift`);
+  console.log(`[Webhook] ${shop} uninstalled StockyShift — data cleaned up`);
   res.status(200).send('OK');
 });
 
@@ -938,4 +975,5 @@ app.post('/webhooks/app/uninstalled', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`StockyShift running on port ${PORT}`);
   console.log(`OAuth callback URL: ${APP_URL}/auth/callback`);
+  if (!APP_URL) console.error('FATAL: APP_URL not set — billing, OAuth, and webhooks will fail');
 });

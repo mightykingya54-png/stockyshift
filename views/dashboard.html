@@ -255,12 +255,12 @@
     // ─── Billing check (runs before anything else) ──────────────────
 
     async function checkBilling() {
-      if (!shop) return;
+      if (!shop) return true;
       try {
         const billing = await api(`/api/billing/status?shop=${shop}`);
-        if (billing.skip_billing) return; // dev mode
+        if (billing.skip_billing) return true; // dev mode
 
-        if (billing.status === 'not_installed') return;
+        if (billing.status === 'not_installed') return true;
 
         if (billing.status === 'pending' || billing.status === 'expired' || billing.status === 'cancelled') {
           // Show billing overlay
@@ -272,7 +272,7 @@
           if (urlParams.get('billing') === 'declined') {
             document.getElementById('billingDeclined').classList.remove('hidden');
           }
-          return;
+          return false;
         }
 
         if (billing.status === 'trial' && billing.trial_days_left > 0) {
@@ -282,8 +282,10 @@
           banner.querySelector('.trial-text').textContent =
             `${billing.trial_days_left} day${billing.trial_days_left > 1 ? 's' : ''} left in your free trial`;
         }
+        return true;
       } catch (e) {
         console.error('Billing check failed:', e);
+        return true; // allow app to load even if billing check fails
       }
     }
 
@@ -670,9 +672,11 @@
 
     // ─── Init ───────────────────────────────────────────────────────
 
-    checkBilling().then(() => {
-      loadStats();
-      loadLowStock();
+    checkBilling().then((billingPassed) => {
+      if (billingPassed !== false) {
+        loadStats();
+        loadLowStock();
+      }
     });
   </script>
 </body>
