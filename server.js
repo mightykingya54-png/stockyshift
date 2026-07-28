@@ -67,6 +67,12 @@ function verifyWebhook(body, hmacHeader) {
 // Serve static dashboard
 app.use(express.static('views'));
 
+// ─── Static Pages ─────────────────────────────────────────────────────────
+
+app.get('/privacy', (req, res) => {
+  res.sendFile(path.join(__dirname, 'views', 'privacy.html'));
+});
+
 // ─── Shopify OAuth ────────────────────────────────────────────────────────
 
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;

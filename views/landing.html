@@ -21,6 +21,9 @@
   <input type="text" id="shopInput" placeholder="your-store.myshopify.com" onkeydown="if(event.key==='Enter')install()">
   <button onclick="install()">Install on your store</button>
   <p class="hint">Enter your Shopify store name above</p>
+  <p style="margin-top:24px;font-size:12px;color:#bbb">
+    <a href="/privacy" style="color:#bbb;text-decoration:underline">Privacy Policy</a>
+  </p>
 </div>
 <script>
   function install(){const s=document.getElementById('shopInput').value.trim();if(!s)return alert('Enter your store name');window.location.href='/auth?shop='+encodeURIComponent(s.endsWith('.myshopify.com')?s:s+'.myshopify.com')}
