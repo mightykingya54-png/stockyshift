@@ -89,6 +89,7 @@ try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN email TEXT;`); } catch (_)
 try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN shopify_charge_id TEXT;`); } catch (_) {}
 try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN billing_status TEXT DEFAULT 'pending';`); } catch (_) {}
 try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN trial_ends_at DATETIME;`); } catch (_) {}
+try { sqliteDb.exec(`ALTER TABLE products ADD COLUMN inventory_item_id INTEGER;`); } catch (_) {}
 
 // ─── Async Promise Wrapper ───────────────────────────────────────────────
 // Converts synchronous better-sqlite3 calls to async promises

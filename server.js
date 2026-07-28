@@ -323,13 +323,14 @@ app.post('/api/sync-products', async (req, res) => {
       for (const product of products) {
         for (const variant of product.variants) {
           await tx.run(`
-            INSERT INTO products (shopify_product_id, shopify_variant_id, shop, title, sku, current_stock)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO products (shopify_product_id, shopify_variant_id, inventory_item_id, shop, title, sku, current_stock)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT(shop, shopify_variant_id) DO UPDATE SET
               title = excluded.title,
               sku = excluded.sku,
-              current_stock = excluded.current_stock
-          `, [product.id, variant.id, shop, product.title, variant.sku || '', inventoryLevels[variant.inventory_item_id] || 0]);
+              current_stock = excluded.current_stock,
+              inventory_item_id = excluded.inventory_item_id
+          `, [product.id, variant.id, variant.inventory_item_id, shop, product.title, variant.sku || '', inventoryLevels[variant.inventory_item_id] || 0]);
           variantCount++;
         }
       }
@@ -504,7 +505,7 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
   }
 });
 
-// Receive against PO
+// Receive against PO (also updates inventory in Shopify)
 app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const { id } = req.params;
   const { shop, items } = req.body; // [{line_item_id, received_qty}]
@@ -515,27 +516,91 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const po = await db.get('SELECT id FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
+  // Collect inventory adjustments needed (computed during transaction below)
+  const adjustments = [];
+
   await db.transaction(async (tx) => {
     for (const item of items) {
+      // Get previous received_qty to calculate delta (supports partial receives)
+      const before = tx.get('SELECT received_qty FROM po_line_items WHERE id = $1 AND po_id = $2', [item.line_item_id, id]);
+      const delta = item.received_qty - (before?.received_qty || 0);
+
       await tx.run(`
         UPDATE po_line_items SET received_qty = $1 WHERE id = $2 AND po_id = $3
       `, [item.received_qty, item.line_item_id, id]);
+
+      // If adding inventory, record adjustment for Shopify push
+      if (delta > 0) {
+        const lineItem = tx.get(`
+          SELECT p.inventory_item_id, p.id AS product_id
+          FROM po_line_items pli
+          JOIN products p ON pli.product_id = p.id
+          WHERE pli.id = $1
+        `, [item.line_item_id]);
+
+        if (lineItem?.inventory_item_id) {
+          adjustments.push({
+            inventory_item_id: lineItem.inventory_item_id,
+            product_id: lineItem.product_id,
+            delta,
+          });
+        }
+      }
     }
 
     // Check if all items are fully received
-    const allItems = await tx.all(`
+    const allItems = tx.all(`
       SELECT ordered_qty, received_qty FROM po_line_items WHERE po_id = $1
     `, [id]);
 
     const allReceived = allItems.every(i => i.received_qty >= i.ordered_qty);
     const status = allReceived ? 'received' : 'partial';
 
-    await tx.run(`
+    tx.run(`
       UPDATE purchase_orders SET status = $1, received_at = CURRENT_TIMESTAMP WHERE id = $2
     `, [status, id]);
   });
 
-  res.json({ success: true });
+  // After transaction: push inventory adjustments to Shopify
+  if (adjustments.length > 0) {
+    try {
+      const token = await getToken(shop);
+      // Get first location (most merchants have only one)
+      const locRes = await axios.get(`https://${shop}/admin/api/2024-04/locations.json`, {
+        headers: { 'X-Shopify-Access-Token': token },
+        timeout: 10000,
+      });
+      const locationId = locRes.data?.locations?.[0]?.id;
+
+      if (locationId) {
+        for (const adj of adjustments) {
+          await axios.post(
+            `https://${shop}/admin/api/2024-04/inventory_levels/adjust.json`,
+            {
+              location_id: locationId,
+              inventory_item_id: adj.inventory_item_id,
+              available_adjustment: adj.delta,
+            },
+            {
+              headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+              timeout: 10000,
+            }
+          );
+          // Keep local stock in sync
+          await db.run('UPDATE products SET current_stock = current_stock + $1 WHERE id = $2 AND shop = $3',
+            [adj.delta, adj.product_id, shop]);
+        }
+        console.log(`[Receive] Shopify inventory updated for ${shop}: ${adjustments.length} items adjusted at location ${locationId}`);
+      } else {
+        console.warn(`[Receive] No locations found for ${shop} — inventory not pushed to Shopify`);
+      }
+    } catch (err) {
+      console.error(`[Receive] Shopify inventory update failed for ${shop}:`, err.response?.data || err.message);
+      // Don't fail the request — PO is received locally. Merchant can re-sync later.
+    }
+  }
+
+  res.json({ success: true, adjustments: adjustments.length });
 });
 
 app.get('/api/purchase-orders', async (req, res) => {
