@@ -46,7 +46,11 @@ app.use(session({
   secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 86400000 }, // 24 hours
+  cookie: {
+    maxAge: 86400000, // 24 hours
+    sameSite: 'none',
+    secure: true,
+  },
 }));
 
 // ─── Shopify HMAC Verification ────────────────────────────────────────────
