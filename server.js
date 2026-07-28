@@ -412,6 +412,45 @@ app.post('/api/vendors', async (req, res) => {
   res.json({ id: result.id });
 });
 
+// Update vendor
+app.put('/api/vendors/:id', async (req, res) => {
+  const { id } = req.params;
+  const { shop, name, email, min_order_amount, notes } = req.body;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+  if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
+
+  await db.run(`
+    UPDATE vendors SET name = $1, email = $2, min_order_amount = $3, notes = $4
+    WHERE id = $5 AND shop = $6
+  `, [name, email, min_order_amount || 0, notes || '', id, shop]);
+
+  res.json({ success: true });
+});
+
+// Delete vendor
+app.delete('/api/vendors/:id', async (req, res) => {
+  const { id } = req.params;
+  const { shop } = req.body;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+
+  // Check if vendor has POs
+  const poCount = await db.get('SELECT COUNT(*) AS count FROM purchase_orders WHERE vendor_id = $1 AND shop = $2', [id, shop]);
+  if (poCount.count > 0) {
+    return res.status(400).json({
+      error: `Cannot delete: vendor has ${poCount.count} existing purchase order(s). Delete the POs first.`
+    });
+  }
+
+  // Unset as preferred vendor on products
+  await db.run('UPDATE products SET preferred_vendor_id = NULL WHERE preferred_vendor_id = $1', [id]);
+  // Delete vendor
+  await db.run('DELETE FROM vendors WHERE id = $1 AND shop = $2', [id, shop]);
+
+  res.json({ success: true });
+});
+
 // ─── PO Routes ───────────────────────────────────────────────────────────
 
 

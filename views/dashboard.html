@@ -523,9 +523,17 @@
         if (data.length === 0) {
           html += `<p style="color:#666">No vendors yet. Add your suppliers so you can generate POs.</p>`;
         } else {
-          html += `<table><tr><th>Name</th><th>Email</th><th>Min Order</th></tr>`;
+          html += `<table><tr><th>Name</th><th>Email</th><th>Min Order</th><th></th></tr>`;
           for (const v of data) {
-            html += `<tr><td><strong>${v.name}</strong></td><td>${v.email}</td><td>${v.min_order_amount > 0 ? '$' + v.min_order_amount : '-'}</td></tr>`;
+            html += `<tr>
+              <td><strong>${v.name}</strong></td>
+              <td>${v.email}</td>
+              <td>${v.min_order_amount > 0 ? '$' + v.min_order_amount : '-'}</td>
+              <td>
+                <button class="btn btn-outline btn-sm" onclick="showEditVendor(${v.id})" style="margin-right:4px">Edit</button>
+                <button class="btn btn-sm" style="background:#fee2e2;color:#dc2626;border:none" onclick="deleteVendor(${v.id})">Delete</button>
+              </td>
+            </tr>`;
           }
           html += '</table>';
         }
@@ -566,6 +574,56 @@
       });
       closeModal();
       loadVendors();
+    }
+
+    async function showEditVendor(id) {
+      const vendors = await api(`/api/vendors?shop=${shop}`);
+      const v = vendors.find(x => x.id === id);
+      if (!v) return;
+
+      const modal = document.getElementById('modalContent');
+      modal.innerHTML = `
+        <h2>Edit Vendor</h2>
+        <input type="hidden" id="editVendorId" value="${v.id}">
+        <label>Vendor Name</label>
+        <input type="text" id="editVendorName" value="${v.name}">
+        <label>Email Address</label>
+        <input type="email" id="editVendorEmail" value="${v.email}">
+        <label>Minimum Order Amount ($, optional)</label>
+        <input type="number" id="editVendorMin" value="${v.min_order_amount || 0}" step="0.01">
+        <div class="btn-row">
+          <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="saveEditVendor()">Save</button>
+        </div>
+      `;
+      document.getElementById('modalOverlay').classList.add('show');
+    }
+
+    async function saveEditVendor() {
+      const id = parseInt(document.getElementById('editVendorId').value);
+      const name = document.getElementById('editVendorName').value;
+      const email = document.getElementById('editVendorEmail').value;
+      const min_order_amount = parseFloat(document.getElementById('editVendorMin').value) || 0;
+      if (!name || !email) return alert('Name and email are required');
+      await api(`/api/vendors/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ shop, name, email, min_order_amount }),
+      });
+      closeModal();
+      loadVendors();
+    }
+
+    async function deleteVendor(id) {
+      if (!confirm('Delete this vendor? This cannot be undone. Vendors with existing POs cannot be deleted.')) return;
+      try {
+        await api(`/api/vendors/${id}`, {
+          method: 'DELETE',
+          body: JSON.stringify({ shop }),
+        });
+        loadVendors();
+      } catch (e) {
+        alert(e.message);
+      }
     }
 
     // ─── Purchase Orders ────────────────────────────────────────────
