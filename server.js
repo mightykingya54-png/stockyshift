@@ -176,26 +176,36 @@ app.get('/auth/callback', async (req, res) => {
   }
 
   try {
-    // Exchange code for access token
+    // Exchange code for access token (expiring=1 required for API 2026-07+)
     const tokenResponse = await axios.post(
       `https://${shop}/admin/oauth/access_token`,
       {
         client_id: SHOPIFY_API_KEY,
         client_secret: SHOPIFY_API_SECRET,
         code,
+        expiring: 1,
       }
     );
 
     const tokenData = tokenResponse.data;
     console.log(`[OAuth] Token response for ${shop}:`, JSON.stringify(tokenData));
     const accessToken = tokenData.access_token;
+    const refreshToken = tokenData.refresh_token || null;
+    const expiresAt = tokenData.expires_in
+      ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
+      : null;
 
-    // Store merchant in database
+    // Store merchant in database (with expiring token support)
     await db.run(`
-      INSERT INTO merchants (shop, access_token)
-      VALUES ($1, $2)
-      ON CONFLICT(shop) DO UPDATE SET access_token = $2, is_active = 1, uninstalled_at = NULL
-    `, [shop, accessToken]);
+      INSERT INTO merchants (shop, access_token, refresh_token, expires_at)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT(shop) DO UPDATE SET
+        access_token = $2,
+        refresh_token = $3,
+        expires_at = $4,
+        is_active = 1,
+        uninstalled_at = NULL
+    `, [shop, accessToken, refreshToken, expiresAt]);
 
     // Register uninstall webhook (async, non-blocking)
     axios.post(`https://${shop}/admin/api/2026-07/graphql.json`, {
@@ -254,6 +264,13 @@ app.get('/', async (req, res, next) => {
       return res.redirect(`/auth?shop=${shop}`);
     }
 
+    // Force re-auth if merchant has a non-expiring token (no refresh_token) — API 2026-07 rejects them
+    if (!merchant.refresh_token) {
+      console.log(`[Auth] ${shop} has non-expiring token, forcing re-auth for API 2026-07 compatibility`);
+      await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+      return res.redirect(`/auth?shop=${shop}`);
+    }
+
     // If SKIP_BILLING is true, force billing status to active
     if (process.env.SKIP_BILLING === 'true') {
       await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
@@ -268,10 +285,49 @@ app.get('/', async (req, res, next) => {
 
 // ─── API Routes ──────────────────────────────────────────────────────────
 
-// Helper: load merchant's access token
+// Helper: load merchant's access token with auto-refresh for expiring tokens (API 2026-07+)
+async function refreshShopifyToken(shop, oldRefreshToken) {
+  const params = new URLSearchParams({
+    client_id: SHOPIFY_API_KEY,
+    client_secret: SHOPIFY_API_SECRET,
+    grant_type: 'refresh_token',
+    refresh_token: oldRefreshToken,
+  });
+  const response = await axios.post(
+    `https://${shop}/admin/oauth/access_token`,
+    params.toString(),
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+  );
+  const { access_token, expires_in, refresh_token: newRefreshToken } = response.data;
+  const expires_at = expires_in
+    ? new Date(Date.now() + expires_in * 1000).toISOString()
+    : null;
+  await db.run(`
+    UPDATE merchants SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE shop = $4
+  `, [access_token, newRefreshToken, expires_at, shop]);
+  return access_token;
+}
+
 async function getToken(shop) {
-  const merchant = await db.get('SELECT access_token FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
-  return merchant?.access_token;
+  const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
+  if (!merchant?.access_token) return null;
+
+  // If the token has an expiry and is within 5 min of expiring (or already expired), refresh it
+  if (merchant.expires_at && merchant.refresh_token) {
+    const expiresAt = new Date(merchant.expires_at).getTime();
+    const fiveMinutesFromNow = Date.now() + 5 * 60 * 1000;
+    if (expiresAt < fiveMinutesFromNow) {
+      try {
+        console.log(`[Token] Refreshing token for ${shop} (expired or expiring soon)`);
+        return await refreshShopifyToken(shop, merchant.refresh_token);
+      } catch (err) {
+        console.error(`[Token] Refresh failed for ${shop}:`, err.response?.data || err.message);
+        // Fall through — return the old token and let the API call fail naturally
+      }
+    }
+  }
+
+  return merchant.access_token;
 }
 
 // Sync products from Shopify
@@ -1042,7 +1098,7 @@ app.get('/api/db-health', async (req, res) => {
 cron.schedule('0 8 * * *', async () => {
   console.log('[Cron] Running daily low stock check...');
   try {
-    const merchants = await db.all('SELECT shop, access_token FROM merchants WHERE is_active = 1');
+    const merchants = await db.all('SELECT shop FROM merchants WHERE is_active = 1');
 
     for (const merchant of merchants) {
       const lowStock = await db.all(`
