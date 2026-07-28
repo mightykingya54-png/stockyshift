@@ -88,7 +88,7 @@ app.get('/auth', async (req, res) => {
     // Validate shop exists before redirecting to Shopify
   try {
     // Real store returns 401 (no auth, but exists). Fake store returns 404.
-    const shopCheck = await axios.get(`https://${shop}/admin/api/2024-04/shop.json`, {
+    const shopCheck = await axios.get(`https://${shop}/admin/api/2026-07/shop.json`, {
       timeout: 5000,
       maxRedirects: 0,
       validateStatus: () => true,
@@ -195,7 +195,7 @@ app.get('/auth/callback', async (req, res) => {
     `, [shop, accessToken]);
 
     // Register uninstall webhook (async, non-blocking)
-    axios.post(`https://${shop}/admin/api/2024-04/graphql.json`, {
+    axios.post(`https://${shop}/admin/api/2026-07/graphql.json`, {
       query: `mutation {
         webhookSubscriptionCreate(topic: APP_UNINSTALLED, webhookSubscription: {
           callbackUrl: "${APP_URL}/webhooks/app/uninstalled"
@@ -280,7 +280,7 @@ app.post('/api/sync-products', async (req, res) => {
   try {
     // Fetch all products from Shopify
     let products = [];
-    let url = `https://${shop}/admin/api/2024-04/products.json?limit=250&fields=id,title,variants`;
+    let url = `https://${shop}/admin/api/2026-07/products.json?limit=250&fields=id,title,variants`;
 
     while (url) {
       const response = await axios.get(url, {
@@ -303,7 +303,7 @@ app.post('/api/sync-products', async (req, res) => {
       // Fetch in chunks of 50 (Shopify limit for inventory_levels query params)
       for (let i = 0; i < variantIds.length; i += 50) {
         const chunk = variantIds.slice(i, i + 50).join(',');
-        let invUrl = `https://${shop}/admin/api/2024-04/inventory_levels.json?inventory_item_ids=${chunk}&limit=250`;
+        let invUrl = `https://${shop}/admin/api/2026-07/inventory_levels.json?inventory_item_ids=${chunk}&limit=250`;
         while (invUrl) {
           const invResponse = await axios.get(invUrl, {
             headers: { 'X-Shopify-Access-Token': token },
@@ -611,7 +611,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     try {
       const token = await getToken(shop);
       // Get first location (most merchants have only one)
-      const locRes = await axios.get(`https://${shop}/admin/api/2024-04/locations.json`, {
+      const locRes = await axios.get(`https://${shop}/admin/api/2026-07/locations.json`, {
         headers: { 'X-Shopify-Access-Token': token },
         timeout: 10000,
       });
@@ -620,7 +620,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
       if (locationId) {
         for (const adj of adjustments) {
           await axios.post(
-            `https://${shop}/admin/api/2024-04/inventory_levels/adjust.json`,
+            `https://${shop}/admin/api/2026-07/inventory_levels/adjust.json`,
             {
               location_id: locationId,
               inventory_item_id: adj.inventory_item_id,
@@ -765,7 +765,7 @@ const CREATE_SUBSCRIPTION_MUTATION = `
 // Create a Shopify billing subscription (GraphQL) and return confirmation URL
 async function createCharge(shop, token) {
   const response = await axios.post(
-    `https://${shop}/admin/api/2024-04/graphql.json`,
+    `https://${shop}/admin/api/2026-07/graphql.json`,
     {
       query: CREATE_SUBSCRIPTION_MUTATION,
       variables: {
@@ -936,7 +936,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
     if (dbChargeId) {
       try {
         const cancelResult = await axios.post(
-          `https://${shop}/admin/api/2024-04/graphql.json`,
+          `https://${shop}/admin/api/2026-07/graphql.json`,
           {
             query: `mutation { appSubscriptionCancel(id: "${dbChargeId}") { userErrors { field message } } }`,
           },
@@ -956,7 +956,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
     // Also query existing subscriptions via GraphQL for diagnostics
     const query = `{ appSubscriptions(first:10) { edges { node { id status } } } }`;
     const result = await axios.post(
-      `https://${shop}/admin/api/2024-04/graphql.json`,
+      `https://${shop}/admin/api/2026-07/graphql.json`,
       { query },
       { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
     );
@@ -971,7 +971,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
         if (!dbChargeId || id !== dbChargeId) { // skip if already tried above
           try {
             const cancelResult = await axios.post(
-              `https://${shop}/admin/api/2024-04/graphql.json`,
+              `https://${shop}/admin/api/2026-07/graphql.json`,
               {
                 query: `mutation { appSubscriptionCancel(id: "${id}") { userErrors { field message } } }`,
               },
