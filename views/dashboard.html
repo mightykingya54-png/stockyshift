@@ -674,12 +674,30 @@
       const vendors = await api(`/api/vendors?shop=${shop}`);
       const p = products.find(x => x.id === productId);
 
+      // No vendors yet — show a prompt to add one first
+      if (vendors.length === 0) {
+        const modal = document.getElementById('modalContent');
+        modal.className = 'modal';
+        modal.innerHTML = `
+          <h2>No Vendors Found</h2>
+          <p style="color:#666;margin-bottom:16px">You need to add a vendor before creating a purchase order for ${p.title}.</p>
+          <div class="btn-row">
+            <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="closeModal();document.querySelector('[data-tab=vendors]').click()">Add Vendor</button>
+          </div>
+        `;
+        document.getElementById('modalOverlay').classList.add('show');
+        return;
+      }
+
       const modal = document.getElementById('modalContent');
+      modal.className = 'modal';
       modal.innerHTML = `
         <h2>Create Purchase Order</h2>
         <p><strong>Product:</strong> ${p.title} (Stock: ${p.current_stock}, Reorder at: ${p.reorder_point})</p>
         <label>Vendor</label>
         <select id="poVendorId">
+          <option value="">— Select a vendor —</option>
           ${vendors.map(v => `<option value="${v.id}" ${v.id === p.preferred_vendor_id ? 'selected' : ''}>${v.name}</option>`).join('')}
         </select>
         <label>Quantity to order</label>
