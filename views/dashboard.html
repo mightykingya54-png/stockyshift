@@ -156,6 +156,18 @@
       margin-bottom: 12px;
     }
     .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+    .modal-wide { width: 700px; }
+
+    .product-pick-list {
+      max-height: 300px;
+      overflow-y: auto;
+      border: 1px solid #eee;
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+    .product-pick-list table { font-size: 12px; }
+    .product-pick-list td { padding: 6px 8px; }
+    .product-pick-list input[type="number"] { width: 60px; padding: 4px 6px; margin: 0; }
 
     .loading { text-align: center; padding: 40px; color: #888; }
     .error { color: #dc2626; padding: 12px; background: #fee2e2; border-radius: 6px; margin-bottom: 12px; }
@@ -502,7 +514,10 @@
         let html = `<div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">🏢 Vendors</h2>
-            <button class="btn btn-primary" onclick="showAddVendor()">+ Add Vendor</button>
+            <div>
+              <button class="btn btn-success btn-sm" onclick="showCreatePOMulti()" style="margin-right:6px">+ New PO</button>
+              <button class="btn btn-primary" onclick="showAddVendor()">+ Add Vendor</button>
+            </div>
           </div>`;
 
         if (data.length === 0) {
@@ -559,7 +574,10 @@
       try {
         const data = await api(`/api/purchase-orders?shop=${shop}`);
         let html = `<div class="card">
-          <h2>📄 Purchase Orders</h2>`;
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <h2 style="margin:0">📄 Purchase Orders</h2>
+            <button class="btn btn-success btn-sm" onclick="showCreatePOMulti()">+ New PO</button>
+          </div>`;
 
         if (data.length === 0) {
           html += `<p style="color:#666">No purchase orders yet. Create one from the Low Stock tab.</p>`;
@@ -642,6 +660,92 @@
       closeModal();
       loadOrders();
       alert('Purchase order created! You can send it from the Orders tab.');
+    }
+
+    // ─── Multi-Product PO ───────────────────────────────────────────
+
+    async function showCreatePOMulti() {
+      const vendors = await api(`/api/vendors?shop=${shop}`);
+      const products = await api(`/api/products?shop=${shop}`);
+
+      if (vendors.length === 0) {
+        return alert('Add at least one vendor first.');
+      }
+
+      const modal = document.getElementById('modalContent');
+      modal.className = 'modal modal-wide';
+
+      let productRows = '';
+      for (const p of products) {
+        const suggested = p.reorder_point > 0 ? Math.max(p.reorder_point - p.current_stock, 0) : 0;
+        productRows += `<tr>
+          <td><strong>${p.title}</strong><br><span style="color:#999;font-size:11px">${p.sku || '-'}</span></td>
+          <td>${p.current_stock}</td>
+          <td>${p.reorder_point || '-'}</td>
+          <td><input type="number" id="poQty_${p.id}" value="${suggested}" min="0" style="width:60px"></td>
+          <td><input type="number" id="poCost_${p.id}" value="${p.unit_cost || ''}" step="0.01" min="0" style="width:70px"></td>
+        </tr>`;
+      }
+
+      modal.innerHTML = `
+        <h2>Create Purchase Order</h2>
+        <label>Vendor</label>
+        <select id="poMultiVendor">
+          ${vendors.map(v => `<option value="${v.id}">${v.name}</option>`).join('')}
+        </select>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 4px">
+          <label style="margin:0;font-size:14px">Items to order</label>
+          <span style="font-size:12px;color:#888">Enter qty > 0 for items you want to order</span>
+        </div>
+        <div class="product-pick-list">
+          <table>
+            <tr>
+              <th style="width:40%">Product</th>
+              <th style="width:12%">Stock</th>
+              <th style="width:12%">Reorder</th>
+              <th style="width:18%">Qty</th>
+              <th style="width:18%">Cost</th>
+            </tr>
+            ${productRows}
+          </table>
+        </div>
+        <label>Notes (optional)</label>
+        <textarea id="poMultiNotes" rows="2"></textarea>
+        <div class="btn-row">
+          <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-success" onclick="savePOMulti()">Create Purchase Order</button>
+        </div>
+      `;
+      document.getElementById('modalOverlay').classList.add('show');
+    }
+
+    async function savePOMulti() {
+      const vendor_id = parseInt(document.getElementById('poMultiVendor').value);
+      const notes = document.getElementById('poMultiNotes').value;
+      if (!vendor_id) return alert('Please select a vendor');
+
+      // Collect all products with qty > 0
+      const items = [];
+      const products = await api(`/api/products?shop=${shop}`);
+      for (const p of products) {
+        const qty = parseInt(document.getElementById(`poQty_${p.id}`)?.value) || 0;
+        if (qty > 0) {
+          const cost = parseFloat(document.getElementById(`poCost_${p.id}`)?.value) || 0;
+          items.push({ product_id: p.id, ordered_qty: qty, unit_cost: cost });
+        }
+      }
+
+      if (items.length === 0) return alert('Enter quantity for at least one product.');
+
+      await api('/api/purchase-orders', {
+        method: 'POST',
+        body: JSON.stringify({ shop, vendor_id, items, notes }),
+      });
+
+      closeModal();
+      loadOrders();
+      loadStats();
+      alert(`Purchase order created with ${items.length} item(s)! Send it from the Orders tab.`);
     }
 
     // ─── Sync ───────────────────────────────────────────────────────
