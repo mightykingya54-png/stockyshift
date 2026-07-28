@@ -149,8 +149,7 @@ app.get('/auth', async (req, res) => {
     `client_id=${SHOPIFY_API_KEY}` +
     `&scope=${SCOPES}` +
     `&redirect_uri=${redirectUri}` +
-    `&state=${state}` +
-    `&grant_options[]=per-user`;
+    `&state=${state}`;
 
   res.redirect(installUrl);
 });
