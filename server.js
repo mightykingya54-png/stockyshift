@@ -663,6 +663,31 @@ app.get('/api/purchase-orders', async (req, res) => {
   res.json(pos);
 });
 
+// Get single PO with line items
+app.get('/api/purchase-orders/:id', async (req, res) => {
+  const { id } = req.params;
+  const { shop } = req.query;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+
+  const po = await db.get(`
+    SELECT po.*, v.name as vendor_name, v.email as vendor_email
+    FROM purchase_orders po
+    JOIN vendors v ON po.vendor_id = v.id
+    WHERE po.id = $1 AND po.shop = $2
+  `, [id, shop]);
+
+  if (!po) return res.status(404).json({ error: 'PO not found' });
+
+  const lineItems = await db.all(`
+    SELECT pli.*, p.title, p.sku, p.current_stock
+    FROM po_line_items pli
+    JOIN products p ON pli.product_id = p.id
+    WHERE pli.po_id = $1
+  `, [id]);
+
+  res.json({ ...po, line_items: lineItems });
+});
+
 // ─── Test Email (dev only) ────────────────────────────────────────────────
 
 if (process.env.NODE_ENV !== 'production') {

@@ -640,7 +640,7 @@
         if (data.length === 0) {
           html += `<p style="color:#666">No purchase orders yet. Create one from the Low Stock tab.</p>`;
         } else {
-          html += `<table><tr><th>PO#</th><th>Vendor</th><th>Total</th><th>Status</th><th>Created</th></tr>`;
+          html += `<table><tr><th>PO#</th><th>Vendor</th><th>Total</th><th>Status</th><th>Created</th><th></th></tr>`;
           for (const po of data) {
             const statusBadge = {
               'draft': '<span class="badge badge-info">Draft</span>',
@@ -649,12 +649,20 @@
               'received': '<span class="badge badge-success">Received</span>',
             }[po.status] || `<span class="badge badge-info">${po.status}</span>`;
 
+            let actions = `<button class="btn btn-outline btn-sm" onclick="viewPO(${po.id})" style="margin-right:4px">View</button>`;
+            if (po.status === 'draft') {
+              actions += `<button class="btn btn-primary btn-sm" onclick="sendPO(${po.id})">Send</button>`;
+            } else if (po.status === 'sent' || po.status === 'partial') {
+              actions += `<button class="btn btn-success btn-sm" onclick="showReceivePO(${po.id})">Receive</button>`;
+            }
+
             html += `<tr>
               <td><strong>${po.po_number}</strong></td>
               <td>${po.vendor_name}</td>
               <td>$${Number(po.total).toFixed(2)}</td>
               <td>${statusBadge}</td>
               <td>${new Date(po.created_at).toLocaleDateString()}</td>
+              <td>${actions}</td>
             </tr>`;
           }
           html += '</table>';
@@ -822,6 +830,130 @@
       loadOrders();
       loadStats();
       alert(`Purchase order created with ${items.length} item(s)! Send it from the Orders tab.`);
+    }
+
+    // ─── PO Actions (View / Send / Receive) ─────────────────────────
+
+    async function viewPO(id) {
+      const po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
+      const modal = document.getElementById('modalContent');
+      modal.className = 'modal modal-wide';
+
+      let itemsHtml = '';
+      for (const item of po.line_items) {
+        const lineTotal = item.ordered_qty * item.unit_cost;
+        itemsHtml += `<tr>
+          <td><strong>${item.title}</strong><br><span style="color:#999;font-size:11px">${item.sku || '-'}</span></td>
+          <td>${item.ordered_qty}</td>
+          <td>$${Number(item.unit_cost).toFixed(2)}</td>
+          <td>$${lineTotal.toFixed(2)}</td>
+          <td>${item.received_qty || 0}</td>
+        </tr>`;
+      }
+
+      modal.innerHTML = `
+        <h2>PO: ${po.po_number}</h2>
+        <p style="color:#666;margin-bottom:12px">
+          Vendor: <strong>${po.vendor_name}</strong> &middot;
+          Status: ${po.status.toUpperCase()} &middot;
+          Created: ${new Date(po.created_at).toLocaleDateString()}
+          ${po.emailed_at ? `&middot; Sent: ${new Date(po.emailed_at).toLocaleDateString()}` : ''}
+          ${po.received_at ? `&middot; Received: ${new Date(po.received_at).toLocaleDateString()}` : ''}
+        </p>
+        ${po.notes ? `<p style="color:#666;font-size:13px;margin-bottom:12px">Notes: ${po.notes}</p>` : ''}
+        <table>
+          <tr><th>Product</th><th>Qty</th><th>Unit Cost</th><th>Total</th><th>Received</th></tr>
+          ${itemsHtml}
+          <tr style="font-weight:700"><td colspan="3">TOTAL</td><td>$${Number(po.total).toFixed(2)}</td><td></td></tr>
+        </table>
+        <div class="btn-row">
+          <button class="btn btn-outline" onclick="closeModal()">Close</button>
+        </div>
+      `;
+      document.getElementById('modalOverlay').classList.add('show');
+    }
+
+    async function sendPO(id) {
+      if (!confirm('Send this purchase order to the vendor via email?')) return;
+      try {
+        await api(`/api/purchase-orders/${id}/send`, {
+          method: 'POST',
+          body: JSON.stringify({ shop }),
+        });
+        loadOrders();
+        alert('Purchase order sent!');
+      } catch (e) {
+        alert('Failed to send: ' + e.message);
+      }
+    }
+
+    async function showReceivePO(id) {
+      const po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
+      const modal = document.getElementById('modalContent');
+      modal.className = 'modal modal-wide';
+
+      let itemsHtml = '';
+      for (const item of po.line_items) {
+        const remaining = item.ordered_qty - (item.received_qty || 0);
+        if (remaining <= 0) {
+          itemsHtml += `<tr style="color:#999">
+            <td><strong>${item.title}</strong></td>
+            <td>${item.ordered_qty}</td>
+            <td>${item.received_qty || 0}</td>
+            <td>✅ Received</td>
+          </tr>`;
+        } else {
+          itemsHtml += `<tr>
+            <td><strong>${item.title}</strong><br><span style="color:#999;font-size:11px">Current stock: ${item.current_stock}</span></td>
+            <td>${item.ordered_qty}</td>
+            <td>${item.received_qty || 0}</td>
+            <td><input type="number" id="recQty_${item.id}" value="${remaining}" min="0" max="${remaining}" style="width:70px"></td>
+          </tr>`;
+        }
+      }
+
+      modal.innerHTML = `
+        <h2>Receive: ${po.po_number}</h2>
+        <p style="color:#666;margin-bottom:12px">Vendor: <strong>${po.vendor_name}</strong></p>
+        <p style="font-size:13px;color:#888;margin-bottom:8px">Enter quantities received. Inventory will be updated in Shopify.</p>
+        <table>
+          <tr><th>Product</th><th>Ordered</th><th>Received</th><th>Now Receiving</th></tr>
+          ${itemsHtml}
+        </table>
+        <div class="btn-row">
+          <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-success" onclick="saveReceivePO(${id})">Confirm Receipt</button>
+        </div>
+      `;
+      document.getElementById('modalOverlay').classList.add('show');
+    }
+
+    async function saveReceivePO(id) {
+      const items = [];
+      const po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
+      for (const item of po.line_items) {
+        const qtyInput = document.getElementById(`recQty_${item.id}`);
+        if (qtyInput) {
+          const received_qty = parseInt(qtyInput.value) || 0;
+          if (received_qty > 0) {
+            items.push({ line_item_id: item.id, received_qty: (item.received_qty || 0) + received_qty });
+          }
+        }
+      }
+
+      if (items.length === 0) return alert('Enter quantity for at least one item.');
+
+      try {
+        await api(`/api/purchase-orders/${id}/receive`, {
+          method: 'POST',
+          body: JSON.stringify({ shop, items }),
+        });
+        closeModal();
+        loadOrders();
+        alert('Receipt recorded! Inventory updated in Shopify.');
+      } catch (e) {
+        alert('Failed to record receipt: ' + e.message);
+      }
     }
 
     // ─── Sync ───────────────────────────────────────────────────────
