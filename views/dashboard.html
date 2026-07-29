@@ -566,7 +566,8 @@
           </div>`;
 
         if (data.length === 0) {
-          html += `<p style="color:#666">No vendors yet. Add your suppliers so you can generate POs.</p>`;
+          html += `<p style="color:#666;margin-bottom:12px">No vendors yet. Add your suppliers so you can generate POs.</p>
+            <button class="btn btn-primary" onclick="showAddVendor()">+ Add Vendor</button>`;
         } else {
           html += `<table><tr><th>Name</th><th>Email</th><th>Min Order</th><th></th></tr>`;
           for (const v of data) {
@@ -686,7 +687,8 @@
           </div>`;
 
         if (data.length === 0) {
-          html += `<p style="color:#666">No purchase orders yet. Create one from the Low Stock tab.</p>`;
+          html += `<p style="color:#666;margin-bottom:12px">No purchase orders yet. Create one from the Vendors or Low Stock tab.</p>
+            <button class="btn btn-success btn-sm" onclick="showCreatePOMulti()">+ New Purchase Order</button>`;
         } else {
           html += `<table><tr><th>PO#</th><th>Vendor</th><th>Total</th><th>Status</th><th>Created</th><th></th></tr>`;
           for (const po of data) {
