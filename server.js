@@ -665,8 +665,9 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     `, [status, id]);
   });
 
-  // After transaction: push inventory adjustments to Shopify
+  // After transaction: push inventory adjustments to Shopify AND always update local stock
   if (adjustments.length > 0) {
+    let shopifySuccess = false;
     try {
       const token = await getToken(shop);
       // Get first location (most merchants have only one)
@@ -690,18 +691,22 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
               timeout: 10000,
             }
           );
-          // Keep local stock in sync
-          await db.run('UPDATE products SET current_stock = current_stock + $1 WHERE id = $2 AND shop = $3',
-            [adj.delta, adj.product_id, shop]);
         }
+        shopifySuccess = true;
         console.log(`[Receive] Shopify inventory updated for ${shop}: ${adjustments.length} items adjusted at location ${locationId}`);
       } else {
-        console.warn(`[Receive] No locations found for ${shop} — inventory not pushed to Shopify`);
+        console.warn(`[Receive] No locations found for ${shop} — Shopify inventory not updated`);
       }
     } catch (err) {
       console.error(`[Receive] Shopify inventory update failed for ${shop}:`, err.response?.data || err.message);
-      // Don't fail the request — PO is received locally. Merchant can re-sync later.
     }
+
+    // Always update local stock, regardless of Shopify push success
+    for (const adj of adjustments) {
+      await db.run('UPDATE products SET current_stock = current_stock + $1 WHERE id = $2 AND shop = $3',
+        [adj.delta, adj.product_id, shop]);
+    }
+    console.log(`[Receive] Local stock updated for ${shop}: ${adjustments.length} items adjusted`);
   }
 
   res.json({ success: true, adjustments: adjustments.length });
