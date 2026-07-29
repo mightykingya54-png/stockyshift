@@ -203,7 +203,7 @@ app.get('/auth/callback', async (req, res) => {
 
     // Store merchant in database (with expiring token support + auto-start trial)
     const trialEnd = new Date();
-    trialEnd.setDate(trialEnd.getDate() + 14);
+    trialEnd.setDate(trialEnd.getDate() + 7);
     await db.run(`
       INSERT INTO merchants (shop, access_token, refresh_token, expires_at, billing_status, trial_ends_at)
       VALUES ($1, $2, $3, $4, 'trial', $5)
@@ -855,8 +855,8 @@ if (process.env.NODE_ENV !== 'production') {
 
 const BILLING_PLAN = {
   name: 'StockyShift Monthly',
-  price: 9.00,
-  trial_days: 14,
+  price: 29.00,
+  trial_days: 7,
   return_url: `${APP_URL}/billing/confirm`,
 };
 
