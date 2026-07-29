@@ -172,6 +172,33 @@
     .loading { text-align: center; padding: 40px; color: #888; }
     .error { color: #dc2626; padding: 12px; background: #fee2e2; border-radius: 6px; margin-bottom: 12px; }
     .hidden { display: none; }
+
+    /* Toast notifications */
+    .toast-container {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .toast {
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      animation: toastIn 0.3s ease;
+      max-width: 380px;
+    }
+    .toast-success { background: #059669; color: white; }
+    .toast-error { background: #dc2626; color: white; }
+    .toast-info { background: #2563eb; color: white; }
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateX(20px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
   </style>
 </head>
 <body>
@@ -217,6 +244,9 @@
       </p>
     </div>
   </div>
+
+  <!-- Toast notifications -->
+  <div class="toast-container" id="toastContainer"></div>
 
   <div id="appContent">
     <div class="header">
@@ -315,7 +345,7 @@
       } catch (e) {
         btn.disabled = false;
         btn.textContent = 'Start 7-Day Free Trial';
-        alert('Failed to start trial: ' + e.message);
+        showToast('Failed to start trial', 'error');
       }
     }
 
@@ -358,6 +388,21 @@
         throw new Error(detail);
       }
       return res.json();
+    }
+
+    // ─── Toast notifications (replaces browser alerts) ──────────────
+
+    function showToast(message, type) {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${type || 'info'}`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.3s';
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
     }
 
     // ─── Stats ──────────────────────────────────────────────────────
@@ -567,13 +612,14 @@
       const name = document.getElementById('vendorName').value;
       const email = document.getElementById('vendorEmail').value;
       const min_order_amount = parseFloat(document.getElementById('vendorMin').value) || 0;
-      if (!name || !email) return alert('Name and email are required');
+      if (!name || !email) return showToast('Name and email are required', 'error');
       await api('/api/vendors', {
         method: 'POST',
         body: JSON.stringify({ shop, name, email, min_order_amount }),
       });
       closeModal();
       loadVendors();
+      showToast('Vendor created!', 'success');
     }
 
     async function showEditVendor(id) {
@@ -604,13 +650,14 @@
       const name = document.getElementById('editVendorName').value;
       const email = document.getElementById('editVendorEmail').value;
       const min_order_amount = parseFloat(document.getElementById('editVendorMin').value) || 0;
-      if (!name || !email) return alert('Name and email are required');
+      if (!name || !email) return showToast('Name and email are required', 'error');
       await api(`/api/vendors/${id}`, {
         method: 'PUT',
         body: JSON.stringify({ shop, name, email, min_order_amount }),
       });
       closeModal();
       loadVendors();
+      showToast('Vendor updated!', 'success');
     }
 
     async function deleteVendor(id) {
@@ -621,8 +668,9 @@
           body: JSON.stringify({ shop }),
         });
         loadVendors();
+        showToast('Vendor deleted', 'success');
       } catch (e) {
-        alert(e.message);
+        showToast(e.message, 'error');
       }
     }
 
@@ -728,8 +776,8 @@
       const unit_cost = parseFloat(document.getElementById('poCost').value) || 0;
       const notes = document.getElementById('poNotes').value;
 
-      if (!vendor_id) return alert('Please select a vendor');
-      if (!ordered_qty || ordered_qty < 1) return alert('Please enter a valid quantity');
+      if (!vendor_id) return showToast('Please select a vendor', 'error');
+      if (!ordered_qty || ordered_qty < 1) return showToast('Please enter a valid quantity', 'error');
 
       await api('/api/purchase-orders', {
         method: 'POST',
@@ -743,7 +791,7 @@
 
       closeModal();
       loadOrders();
-      alert('Purchase order created! You can send it from the Orders tab.');
+      showToast('Purchase order created! You can send it from the Orders tab.', 'success');
     }
 
     // ─── Multi-Product PO ───────────────────────────────────────────
@@ -753,7 +801,7 @@
       const products = await api(`/api/products?shop=${shop}`);
 
       if (vendors.length === 0) {
-        return alert('Add at least one vendor first.');
+        return showToast('Add at least one vendor first.', 'error');
       }
 
       const modal = document.getElementById('modalContent');
@@ -806,7 +854,7 @@
     async function savePOMulti() {
       const vendor_id = parseInt(document.getElementById('poMultiVendor').value);
       const notes = document.getElementById('poMultiNotes').value;
-      if (!vendor_id) return alert('Please select a vendor');
+      if (!vendor_id) return showToast('Please select a vendor', 'error');
 
       // Collect all products with qty > 0
       const items = [];
@@ -819,7 +867,7 @@
         }
       }
 
-      if (items.length === 0) return alert('Enter quantity for at least one product.');
+      if (items.length === 0) return showToast('Enter quantity for at least one product.', 'error');
 
       await api('/api/purchase-orders', {
         method: 'POST',
@@ -829,7 +877,7 @@
       closeModal();
       loadOrders();
       loadStats();
-      alert(`Purchase order created with ${items.length} item(s)! Send it from the Orders tab.`);
+      showToast(`Purchase order created with ${items.length} item(s)!`, 'success');
     }
 
     // ─── PO Actions (View / Send / Receive) ─────────────────────────
@@ -881,9 +929,9 @@
           body: JSON.stringify({ shop }),
         });
         loadOrders();
-        alert('Purchase order sent!');
+        showToast('Purchase order sent!', 'success');
       } catch (e) {
-        alert('Failed to send: ' + e.message);
+        showToast('Failed to send: ' + e.message, 'error');
       }
     }
 
@@ -941,7 +989,7 @@
         }
       }
 
-      if (items.length === 0) return alert('Enter quantity for at least one item.');
+      if (items.length === 0) return showToast('Enter quantity for at least one item.', 'error');
 
       try {
         await api(`/api/purchase-orders/${id}/receive`, {
@@ -950,9 +998,9 @@
         });
         closeModal();
         loadOrders();
-        alert('Receipt recorded! Inventory updated in Shopify.');
+        showToast('Receipt recorded! Inventory updated.', 'success');
       } catch (e) {
-        alert('Failed to record receipt: ' + e.message);
+        showToast('Failed to record receipt: ' + e.message, 'error');
       }
     }
 
@@ -967,9 +1015,9 @@
         loadProducts();
         loadLowStock();
         loadStats();
-        alert('Products synced successfully!');
+        showToast('Products synced successfully!', 'success');
       } catch (e) {
-        alert('Sync failed. Check the server logs.');
+        showToast('Sync failed: ' + e.message, 'error');
       }
     }
 
