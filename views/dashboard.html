@@ -55,6 +55,8 @@
       padding: 20px;
       margin-bottom: 16px;
       box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
     }
     .card h2 { font-size: 16px; margin-bottom: 12px; color: #1a1a2e; }
     .card h3 { font-size: 14px; margin-bottom: 8px; color: #444; }
@@ -116,6 +118,11 @@
       grid-template-columns: repeat(3, 1fr);
       gap: 16px;
       margin-bottom: 24px;
+    }
+    @media (max-width: 640px) {
+      .stats-row { grid-template-columns: 1fr; }
+      .header { flex-direction: column; gap: 8px; text-align: center; }
+      .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     }
     .stat-card {
       background: white;
@@ -304,12 +311,17 @@
 
         if (billing.status === 'not_installed') return true;
 
-        if (billing.status === 'pending' || billing.status === 'expired' || billing.status === 'cancelled') {
+        if (billing.status === 'pending' || billing.status === 'expired' || billing.status === 'cancelled' ||
+            (billing.status === 'trial' && billing.trial_days_left <= 0)) {
           // Show billing overlay
           document.getElementById('appContent').classList.add('hidden');
           const ol = document.getElementById('billingOverlay');
           ol.style.display = 'flex';
           ol.classList.remove('hidden');
+          // Update button for expired trial
+          if (billing.status === 'trial' && billing.trial_days_left <= 0) {
+            document.getElementById('startTrialBtn').textContent = 'Resubscribe — $29/month';
+          }
           // Show declined message if they just came back from billing page
           if (urlParams.get('billing') === 'declined') {
             document.getElementById('billingDeclined').classList.remove('hidden');
@@ -349,17 +361,22 @@
       }
     }
 
-    // ─── Tab switching ──────────────────────────────────────────────
+    // ─── Tab switching (with URL hash for reload persistence) ────────
+
+    function switchTab(tabName) {
+      // Update URL hash so reloads remember which tab was open
+      window.location.hash = tabName;
+      // Update UI
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(tc => tc.classList.add('hidden'));
+      const tab = document.querySelector(`[data-tab="${tabName}"]`);
+      if (tab) tab.classList.add('active');
+      document.getElementById(`tab-${tabName}`).classList.remove('hidden');
+      loadTab(tabName);
+    }
 
     document.querySelectorAll('.tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach(tc => tc.classList.add('hidden'));
-        tab.classList.add('active');
-        const tabName = tab.dataset.tab;
-        document.getElementById(`tab-${tabName}`).classList.remove('hidden');
-        loadTab(tabName);
-      });
+      tab.addEventListener('click', () => switchTab(tab.dataset.tab));
     });
 
     function loadTab(name) {
@@ -388,6 +405,18 @@
         throw new Error(detail);
       }
       return res.json();
+    }
+
+    // ─── HTML escape helper (prevents self-XSS from user-entered data) ──
+
+    function esc(str) {
+      if (str == null) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     // ─── Toast notifications (replaces browser alerts) ──────────────
@@ -453,11 +482,11 @@
         for (const p of data) {
           const deficit = p.reorder_point - p.current_stock;
           html += `<tr>
-            <td><strong>${p.title}</strong></td>
-            <td>${p.sku || '-'}</td>
+            <td><strong>${esc(p.title)}</strong></td>
+            <td>${esc(p.sku || '-')}</td>
             <td><span class="badge badge-danger">${p.current_stock}</span></td>
             <td>${p.reorder_point}</td>
-            <td>${p.vendor_name || '-'}</td>
+            <td>${esc(p.vendor_name || '-')}</td>
             <td>
               <button class="btn btn-primary btn-sm" onclick="createPOForProduct(${p.id})">Order</button>
             </td>
@@ -497,10 +526,10 @@
             ? `<span class="badge badge-danger">${p.current_stock}</span>`
             : `<span class="badge badge-success">${p.current_stock}</span>`;
 
-          html += `<tr>
-            <td><strong>${p.title}</strong></td>
-            <td>${p.sku || '-'}</td>
-            <td>${badge}</td>
+            html += `<tr>
+              <td><strong>${esc(p.title)}</strong></td>
+              <td>${esc(p.sku || '-')}</td>
+              <td>${badge}</td>
             <td>${p.reorder_point > 0 ? p.reorder_point : '-'}</td>
             <td>${p.vendor_name || '-'}</td>
             <td><button class="btn btn-outline btn-sm" onclick="editProduct(${p.id})">Edit</button></td>
@@ -522,7 +551,7 @@
 
       const modal = document.getElementById('modalContent');
       modal.innerHTML = `
-        <h2>Edit: ${p.title}</h2>
+        <h2>Edit: ${esc(p.title)}</h2>
         <label>Reorder Point (alert when stock drops below)</label>
         <input type="number" id="reorderPoint" value="${p.reorder_point || 0}" min="0">
         <label>Preferred Vendor</label>
@@ -572,8 +601,8 @@
           html += `<table><tr><th>Name</th><th>Email</th><th>Min Order</th><th></th></tr>`;
           for (const v of data) {
             html += `<tr>
-              <td><strong>${v.name}</strong></td>
-              <td>${v.email}</td>
+              <td><strong>${esc(v.name)}</strong></td>
+              <td>${esc(v.email)}</td>
               <td>${v.min_order_amount > 0 ? '$' + v.min_order_amount : '-'}</td>
               <td>
                 <button class="btn btn-outline btn-sm" onclick="showEditVendor(${v.id})" style="margin-right:4px">Edit</button>
@@ -633,9 +662,9 @@
         <h2>Edit Vendor</h2>
         <input type="hidden" id="editVendorId" value="${v.id}">
         <label>Vendor Name</label>
-        <input type="text" id="editVendorName" value="${v.name}">
+        <input type="text" id="editVendorName" value="${esc(v.name)}">
         <label>Email Address</label>
-        <input type="email" id="editVendorEmail" value="${v.email}">
+        <input type="email" id="editVendorEmail" value="${esc(v.email)}">
         <label>Minimum Order Amount ($, optional)</label>
         <input type="number" id="editVendorMin" value="${v.min_order_amount || 0}" step="0.01">
         <div class="btn-row">
@@ -707,8 +736,8 @@
             }
 
             html += `<tr>
-              <td><strong>${po.po_number}</strong></td>
-              <td>${po.vendor_name}</td>
+              <td><strong>${esc(po.po_number)}</strong></td>
+              <td>${esc(po.vendor_name)}</td>
               <td>$${Number(po.total).toFixed(2)}</td>
               <td>${statusBadge}</td>
               <td>${new Date(po.created_at).toLocaleDateString()}</td>
@@ -738,7 +767,7 @@
         modal.className = 'modal';
         modal.innerHTML = `
           <h2>No Vendors Found</h2>
-          <p style="color:#666;margin-bottom:16px">You need to add a vendor before creating a purchase order for ${p.title}.</p>
+          <p style="color:#666;margin-bottom:16px">You need to add a vendor before creating a purchase order for ${esc(p.title)}.</p>
           <div class="btn-row">
             <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
             <button class="btn btn-primary" onclick="closeModal();document.querySelector('[data-tab=vendors]').click()">Add Vendor</button>
@@ -752,7 +781,7 @@
       modal.className = 'modal';
       modal.innerHTML = `
         <h2>Create Purchase Order</h2>
-        <p><strong>Product:</strong> ${p.title} (Stock: ${p.current_stock}, Reorder at: ${p.reorder_point})</p>
+        <p><strong>Product:</strong> ${esc(p.title)} (Stock: ${p.current_stock}, Reorder at: ${p.reorder_point})</p>
         <label>Vendor</label>
         <select id="poVendorId">
           <option value="">— Select a vendor —</option>
@@ -813,7 +842,7 @@
       for (const p of products) {
         const suggested = p.reorder_point > 0 ? Math.max(p.reorder_point - p.current_stock, 0) : 0;
         productRows += `<tr>
-          <td><strong>${p.title}</strong><br><span style="color:#999;font-size:11px">${p.sku || '-'}</span></td>
+          <td><strong>${esc(p.title)}</strong><br><span style="color:#999;font-size:11px">${esc(p.sku || '-')}</span></td>
           <td>${p.current_stock}</td>
           <td>${p.reorder_point || '-'}</td>
           <td><input type="number" id="poQty_${p.id}" value="${suggested}" min="0" style="width:60px"></td>
@@ -910,7 +939,7 @@
           ${po.emailed_at ? `&middot; Sent: ${new Date(po.emailed_at).toLocaleDateString()}` : ''}
           ${po.received_at ? `&middot; Received: ${new Date(po.received_at).toLocaleDateString()}` : ''}
         </p>
-        ${po.notes ? `<p style="color:#666;font-size:13px;margin-bottom:12px">Notes: ${po.notes}</p>` : ''}
+        ${po.notes ? `<p style="color:#666;font-size:13px;margin-bottom:12px">Notes: ${esc(po.notes)}</p>` : ''}
         <table>
           <tr><th>Product</th><th>Qty</th><th>Unit Cost</th><th>Total</th><th>Received</th></tr>
           ${itemsHtml}
@@ -923,8 +952,11 @@
       document.getElementById('modalOverlay').classList.add('show');
     }
 
+    const sendingPOs = new Set();
     async function sendPO(id) {
+      if (sendingPOs.has(id)) return; // already sending
       if (!confirm('Send this purchase order to the vendor via email?')) return;
+      sendingPOs.add(id);
       try {
         await api(`/api/purchase-orders/${id}/send`, {
           method: 'POST',
@@ -934,6 +966,8 @@
         showToast('Purchase order sent!', 'success');
       } catch (e) {
         showToast('Failed to send: ' + e.message, 'error');
+      } finally {
+        sendingPOs.delete(id);
       }
     }
 
@@ -1009,17 +1043,23 @@
     // ─── Sync ───────────────────────────────────────────────────────
 
     async function syncProducts() {
+      const btn = document.querySelector('[onclick="syncProducts()"]');
+      if (btn) { btn.disabled = true; btn.textContent = '⟳ Syncing...'; }
+      // Show a toast for long syncs so user knows something is happening
+      showToast('Syncing products from Shopify...', 'info');
       try {
-        await api('/api/sync-products', {
+        const result = await api('/api/sync-products', {
           method: 'POST',
           body: JSON.stringify({ shop }),
         });
         loadProducts();
         loadLowStock();
         loadStats();
-        showToast('Products synced successfully!', 'success');
+        showToast(`Synced ${result.synced} product variants!`, 'success');
       } catch (e) {
         showToast('Sync failed: ' + e.message, 'error');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '⟳ Sync Products'; }
       }
     }
 
@@ -1034,10 +1074,19 @@
 
     // ─── Init ───────────────────────────────────────────────────────
 
+    // Read active tab from URL hash (supports tab persistence on reload)
+    function getInitialTab() {
+      const hash = window.location.hash.replace('#', '');
+      const validTabs = ['low-stock', 'products', 'vendors', 'orders'];
+      return validTabs.includes(hash) ? hash : 'low-stock';
+    }
+
     checkBilling().then((billingPassed) => {
       if (billingPassed !== false) {
         loadStats();
-        loadLowStock();
+        // Load the tab that was open before reload (or default to low-stock)
+        const initialTab = getInitialTab();
+        switchTab(initialTab);
       }
     });
   </script>

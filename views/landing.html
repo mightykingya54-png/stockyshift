@@ -3,6 +3,7 @@
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>StockyShift</title>
 <style>
+  *{box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f7fa;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px}
   .card{background:white;border-radius:12px;padding:40px;box-shadow:0 2px 12px rgba(0,0,0,0.08);max-width:420px;width:100%;text-align:center}
   h1{font-size:28px;color:#1a1a2e;margin:0 0 8px 0}
@@ -12,21 +13,88 @@
   button{width:100%;padding:12px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
   button:hover{background:#2a2a4e}
   .hint{color:#999;font-size:13px;margin-top:8px}
+  .spinner{margin:20px auto;width:32px;height:32px;border:3px solid #e0e0e0;border-top-color:#1a1a2e;border-radius:50%;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .error-msg{color:#dc2626;background:#fee2e2;border-radius:8px;padding:12px;font-size:13px;margin-bottom:16px}
+  .btn-link{background:none;border:none;color:#4a6cf7;text-decoration:underline;cursor:pointer;padding:0;font:inherit}
+  #standalone{display:block}
+  #embedded{display:none}
 </style>
 </head>
 <body>
-<div class="card">
+<div class="card" id="standalone">
   <h1>StockyShift</h1>
   <p>Purchase orders &amp; low stock alerts for Shopify. The simple Stocky alternative.</p>
-  <input type="text" id="shopInput" placeholder="your-store.myshopify.com" onkeydown="if(event.key==='Enter')install()">
+  <input type="text" id="shopInput" placeholder="your-store.myshopify.com" autofocus onkeydown="if(event.key==='Enter')install()">
   <button onclick="install()">Install on your store</button>
   <p class="hint">Enter your Shopify store name above</p>
   <p style="margin-top:24px;font-size:12px;color:#bbb">
     <a href="/privacy" style="color:#bbb;text-decoration:underline">Privacy Policy</a>
+    &nbsp;·&nbsp;
+    <a href="/terms" style="color:#bbb;text-decoration:underline">Terms of Service</a>
   </p>
 </div>
+<div class="card" id="embedded" style="display:none">
+  <h1>StockyShift</h1>
+  <p id="embedMsg">Loading your dashboard...</p>
+  <div class="spinner" id="embedSpinner"></div>
+  <div id="embedError" class="error-msg" style="display:none">
+    Could not connect to your store. Please try reinstalling StockyShift from the Shopify App Store.
+  </div>
+</div>
 <script>
-  function install(){const s=document.getElementById('shopInput').value.trim();if(!s)return alert('Enter your store name');window.location.href='/auth?shop='+encodeURIComponent(s.endsWith('.myshopify.com')?s:s+'.myshopify.com')}
+(function(){
+  // ── Detect if embedded in Shopify Admin iframe ──
+  const isEmbedded = window.top !== window.self;
+
+  // ── Always hide install form when embedded ──
+  if (isEmbedded) {
+    document.getElementById('standalone').style.display = 'none';
+    document.getElementById('embedded').style.display = 'block';
+  }
+
+  // ── Read shop from URL ──
+  const params = new URLSearchParams(window.location.search);
+  let shop = params.get('shop');
+
+  // App proxy may pass shop differently — check the pathname too
+  if (!shop) {
+    const referrer = document.referrer || '';
+    const refMatch = referrer.match(/shop=([^&]+)/);
+    if (refMatch) shop = refMatch[1];
+  }
+
+  if (isEmbedded && shop) {
+    // Check if already authenticated via a lightweight ping
+    fetch('/api/billing/status?shop=' + encodeURIComponent(shop), {
+      signal: AbortSignal.timeout(5000)
+    })
+      .then(r => {
+        if (r.ok) {
+          window.top.location.href = '/?shop=' + encodeURIComponent(shop);
+        } else {
+          window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+        }
+      })
+      .catch(() => {
+        window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+      });
+  } else if (isEmbedded && !shop) {
+    // Embedded but no shop found — show error instead of infinite spinner
+    document.getElementById('embedSpinner').style.display = 'none';
+    document.getElementById('embedMsg').textContent = 'Unable to connect to your store.';
+    document.getElementById('embedError').style.display = 'block';
+  }
+
+  // ── Install function for standalone mode ──
+  window.install = function(){
+    const s = document.getElementById('shopInput').value.trim();
+    if (!s) return alert('Enter your store name');
+    window.location.href = '/auth?shop=' + encodeURIComponent(
+      s.endsWith('.myshopify.com') ? s : s + '.myshopify.com'
+    );
+  };
+})();
 </script>
 </body>
 </html>

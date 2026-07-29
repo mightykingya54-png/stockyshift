@@ -11,7 +11,7 @@ const { sendPOEmail } = require('./lib/email');
 // Session store: SQLite (synchronous, persistent file)
 const SqliteStore = require('better-sqlite3-session-store')(session);
 const SessionStore = new SqliteStore({
-  client: require('better-sqlite3')(process.env.DB_PATH || path.join(__dirname, 'stockyshift_sessions.db')),
+  client: require('better-sqlite3')(path.join(__dirname, 'stockyshift_sessions.db')),
   expired: { clear: true, intervalMs: 900000 },
 });
 
@@ -26,8 +26,10 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   // Embedded apps MUST be frameable by Shopify admin
   // Use CSP frame-ancestors (modern) instead of X-Frame-Options (deprecated for this use case)
-  if (req.query.shop) {
-    res.setHeader('Content-Security-Policy', `frame-ancestors https://${req.query.shop} https://admin.shopify.com;`);
+  const shop = (req.query.shop || '').trim();
+  // Only allow valid myshopify.com domains to prevent header injection
+  if (shop && /^[a-zA-Z0-9][a-zA-Z0-9.-]*\.myshopify\.com$/.test(shop)) {
+    res.setHeader('Content-Security-Policy', `frame-ancestors https://${shop} https://admin.shopify.com;`);
   } else {
     res.setHeader('X-Frame-Options', 'DENY');
   }
@@ -75,6 +77,10 @@ app.use(express.static('views'));
 
 app.get('/privacy', (req, res) => {
   res.sendFile(path.join(__dirname, 'views', 'privacy.html'));
+});
+
+app.get('/terms', (req, res) => {
+  res.sendFile(path.join(__dirname, 'views', 'terms.html'));
 });
 
 // ─── Shopify OAuth ────────────────────────────────────────────────────────
@@ -195,17 +201,27 @@ app.get('/auth/callback', async (req, res) => {
       ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
       : null;
 
-    // Store merchant in database (with expiring token support)
+    // Store merchant in database (with expiring token support + auto-start trial)
+    const trialEnd = new Date();
+    trialEnd.setDate(trialEnd.getDate() + 14);
     await db.run(`
-      INSERT INTO merchants (shop, access_token, refresh_token, expires_at)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO merchants (shop, access_token, refresh_token, expires_at, billing_status, trial_ends_at)
+      VALUES ($1, $2, $3, $4, 'trial', $5)
       ON CONFLICT(shop) DO UPDATE SET
         access_token = $2,
         refresh_token = $3,
         expires_at = $4,
         is_active = 1,
-        uninstalled_at = NULL
-    `, [shop, accessToken, refreshToken, expiresAt]);
+        uninstalled_at = NULL,
+        billing_status = CASE
+          WHEN billing_status IN ('pending', 'expired', 'cancelled') THEN 'trial'
+          ELSE billing_status
+        END,
+        trial_ends_at = CASE
+          WHEN billing_status IN ('pending', 'expired', 'cancelled') THEN $5
+          ELSE trial_ends_at
+        END
+    `, [shop, accessToken, refreshToken, expiresAt, trialEnd.toISOString()]);
 
     // Register uninstall webhook (async, non-blocking)
     axios.post(`https://${shop}/admin/api/2026-07/graphql.json`, {
@@ -234,6 +250,8 @@ app.get('/auth/callback', async (req, res) => {
       console.warn(`[OAuth] Could not fetch email for ${shop}: ${err.message}`);
     });
 
+    // Store shop in session so embedded iframe reload works without ?shop= in URL
+    req.session.shop = shop;
     // Redirect merchant to the embedded app or dashboard
     res.redirect(`/?shop=${shop}`);
   } catch (err) {
@@ -247,8 +265,12 @@ app.get('/auth/callback', async (req, res) => {
 // Serve the dashboard for any root request with a shop parameter
 app.get('/', async (req, res, next) => {
   try {
-    const { shop, reauth } = req.query;
+    let { shop, reauth } = req.query;
     if (!shop) {
+      // Check session if shop was stored during OAuth (supports embedded iframe reloads)
+      if (req.session?.shop) {
+        return res.redirect(`/?shop=${encodeURIComponent(req.session.shop)}`);
+      }
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
@@ -281,6 +303,45 @@ app.get('/', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+// ─── App Proxy Route ─────────────────────────────────────────────────────
+
+// Shopify Admin proxies requests to /apps/stockyshift when the app is embedded
+// The landing page detects the iframe context and handles auth redirect
+app.get('/apps/stockyshift', async (req, res) => {
+  // Extract shop from Shopify's signed proxy request
+  let { shop } = req.query;
+  if (!shop) {
+    // Check session if shop was stored during OAuth (supports embedded iframe reloads)
+    if (req.session?.shop) {
+      return res.redirect(`/?shop=${encodeURIComponent(req.session.shop)}`);
+    }
+    return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
+  }
+
+  // Check if merchant is authenticated
+  const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
+
+  // If SKIP_BILLING is true, force billing status to active
+  if (process.env.SKIP_BILLING === 'true' && merchant) {
+    await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
+  }
+
+  if (!merchant) {
+    // Not authenticated — serve landing page, JS will redirect to auth
+    return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
+  }
+
+  // Force re-auth if old token (no refresh_token)
+  if (!merchant.refresh_token) {
+    console.log(`[Auth] ${shop} (via proxy) has non-expiring token, forcing re-auth`);
+    await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+    return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
+  }
+
+  // Authenticated — serve the dashboard directly through the iframe
+  res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
 });
 
 // ─── API Routes ──────────────────────────────────────────────────────────
@@ -414,6 +475,7 @@ app.post('/api/sync-products', async (req, res) => {
 app.get('/api/low-stock', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   // Join products with vendors to show vendor info alongside low stock items
   const lowStock = await db.all(`
@@ -434,6 +496,7 @@ app.get('/api/low-stock', async (req, res) => {
 app.get('/api/products', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const products = await db.all(`
     SELECT * FROM products WHERE shop = $1 AND is_active = 1 ORDER BY title
@@ -460,6 +523,7 @@ app.post('/api/products/reorder-point', async (req, res) => {
 app.get('/api/vendors', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const vendors = await db.all('SELECT * FROM vendors WHERE shop = $1 ORDER BY name', [shop]);
   res.json(vendors);
@@ -468,6 +532,7 @@ app.get('/api/vendors', async (req, res) => {
 app.post('/api/vendors', async (req, res) => {
   const { shop, name, email, min_order_amount, notes } = req.body;
   if (!shop || !name || !email) return res.status(400).json({ error: 'Missing required fields' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   const result = await db.get(
@@ -484,6 +549,7 @@ app.put('/api/vendors/:id', async (req, res) => {
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
   if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
 
   await db.run(`
     UPDATE vendors SET name = $1, email = $2, min_order_amount = $3, notes = $4
@@ -620,6 +686,16 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const po = await db.get('SELECT id FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
+  // Validate quantities: can't receive more than ordered
+  for (const item of items) {
+    const lineItemCheck = await db.get('SELECT ordered_qty, received_qty FROM po_line_items WHERE id = $1 AND po_id = $2', [item.line_item_id, id]);
+    if (!lineItemCheck) return res.status(400).json({ error: `Line item ${item.line_item_id} not found on this PO` });
+    const maxReceive = lineItemCheck.ordered_qty - (lineItemCheck.received_qty || 0);
+    if (item.received_qty > lineItemCheck.ordered_qty) {
+      return res.status(400).json({ error: `Cannot receive more than ${lineItemCheck.ordered_qty} for this item (ordered: ${lineItemCheck.ordered_qty}, already received: ${lineItemCheck.received_qty || 0})` });
+    }
+  }
+
   // Collect inventory adjustments needed (computed during transaction below)
   const adjustments = [];
 
@@ -715,6 +791,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
 app.get('/api/purchase-orders', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const pos = await db.all(`
     SELECT po.*, v.name as vendor_name
@@ -732,6 +809,7 @@ app.get('/api/purchase-orders/:id', async (req, res) => {
   const { id } = req.params;
   const { shop } = req.query;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const po = await db.get(`
     SELECT po.*, v.name as vendor_name, v.email as vendor_email
@@ -777,8 +855,8 @@ if (process.env.NODE_ENV !== 'production') {
 
 const BILLING_PLAN = {
   name: 'StockyShift Monthly',
-  price: 29.00,
-  trial_days: 7,
+  price: 9.00,
+  trial_days: 14,
   return_url: `${APP_URL}/billing/confirm`,
 };
 

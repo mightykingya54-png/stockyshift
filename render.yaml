@@ -4,9 +4,16 @@ services:
     env: node
     buildCommand: npm install
     startCommand: node server.js
+    # Persistent disk for SQLite database (required — without it, all data is lost on deploy)
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: 20
+      - key: NODE_ENV
+        value: production
       - key: SHOPIFY_API_KEY
         sync: false
       - key: SCOPES
@@ -21,17 +28,19 @@ services:
         value: 10000
       - key: APP_URL
         sync: false
+      - key: DB_PATH
+        value: /data/stockyshift.db
+      # Production: Resend SMTP (update after creating account + verifying domain)
       - key: SMTP_HOST
-        value: live.smtp.mailtrap.io
+        value: smtp.resend.com
       - key: SMTP_PORT
-        value: "2525"
+        value: "587"
       - key: SMTP_USER
-        value: api
+        value: resend
       - key: SMTP_PASS
         sync: false
       - key: FROM_EMAIL
-        sync: false
-      - key: DB_PATH
-        sync: false
+        value: purchase-orders@stockyshift.com
+      # Billing: set to "false" for real charges. Use "true" only for local dev.
       - key: BILLING_TEST_MODE
-        value: "true"
+        value: "false"
