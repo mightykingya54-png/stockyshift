@@ -1080,8 +1080,8 @@
     // ─── Sync ───────────────────────────────────────────────────────
 
     async function syncProducts() {
-      const btn = document.querySelector('[onclick="syncProducts()"]');
-      if (btn) { btn.disabled = true; btn.textContent = '⟳ Syncing...'; }
+      const btns = document.querySelectorAll('[onclick="syncProducts()"]');
+      btns.forEach(b => { b.disabled = true; b.textContent = '⟳ Syncing...'; });
       // Show a toast for long syncs so user knows something is happening
       showToast('Syncing products from Shopify...', 'info');
       try {
@@ -1096,7 +1096,7 @@
       } catch (e) {
         showToast('Sync failed: ' + e.message, 'error');
       } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '⟳ Sync Products'; }
+        btns.forEach(b => { b.disabled = false; b.textContent = '⟳ Sync Products'; });
       }
     }
 

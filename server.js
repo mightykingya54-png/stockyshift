@@ -18,6 +18,9 @@ const SessionStore = new SqliteStore({
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Shopify API version — update when Shopify deprecates the current version
+const API_VERSION = '2026-07';
+
 // ─── Middleware ───────────────────────────────────────────────────────────
 
 // ─── Security Headers (App Store requirement, embedded-app compatible) ─────
@@ -95,10 +98,18 @@ app.get('/auth', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop parameter');
 
+  // Escape shop for safe HTML rendering
+  const escShop = String(shop)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
     // Validate shop exists before redirecting to Shopify
   try {
     // Real store returns 401 (no auth, but exists). Fake store returns 404.
-    const shopCheck = await axios.get(`https://${shop}/admin/api/2026-07/shop.json`, {
+    const shopCheck = await axios.get(`https://${shop}/admin/api/${API_VERSION}/shop.json`, {
       timeout: 5000,
       maxRedirects: 0,
       validateStatus: () => true,
@@ -118,7 +129,7 @@ app.get('/auth', async (req, res) => {
       </head><body>
       <div class="card">
         <h1>Store not found</h1>
-        <p>We couldn't find a Shopify store at <strong>${shop}</strong>.</p>
+        <p>We couldn't find a Shopify store at <strong>${escShop}</strong>.</p>
         <p>Check the spelling and try again.</p>
         <a class="btn" href="/">Try again</a>
       </div>
@@ -141,7 +152,7 @@ app.get('/auth', async (req, res) => {
       </head><body>
       <div class="card">
         <h1>Store not found</h1>
-        <p>We couldn't find a Shopify store at <strong>${shop}</strong>.</p>
+        <p>We couldn't find a Shopify store at <strong>${escShop}</strong>.</p>
         <p>Check the spelling and try again.</p>
         <a class="btn" href="/">Try again</a>
       </div>
@@ -222,7 +233,7 @@ app.get('/auth/callback', async (req, res) => {
     `, [shop, accessToken, refreshToken, expiresAt]);
 
     // Register uninstall webhook (async, non-blocking)
-    axios.post(`https://${shop}/admin/api/2026-07/graphql.json`, {
+    axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
       query: `mutation {
         webhookSubscriptionCreate(topic: APP_UNINSTALLED, webhookSubscription: {
           callbackUrl: "${APP_URL}/webhooks/app/uninstalled"
@@ -307,39 +318,43 @@ app.get('/', async (req, res, next) => {
 
 // Shopify Admin proxies requests to /apps/stockyshift when the app is embedded
 // The landing page detects the iframe context and handles auth redirect
-app.get('/apps/stockyshift', async (req, res) => {
-  // Extract shop from Shopify's signed proxy request
-  let { shop } = req.query;
-  if (!shop) {
-    // Check session if shop was stored during OAuth (supports embedded iframe reloads)
-    if (req.session?.shop) {
-      return res.redirect(`/?shop=${encodeURIComponent(req.session.shop)}`);
+app.get('/apps/stockyshift', async (req, res, next) => {
+  try {
+    // Extract shop from Shopify's signed proxy request
+    let { shop } = req.query;
+    if (!shop) {
+      // Check session if shop was stored during OAuth (supports embedded iframe reloads)
+      if (req.session?.shop) {
+        return res.redirect(`/?shop=${encodeURIComponent(req.session.shop)}`);
+      }
+      return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
-    return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
+
+    // Check if merchant is authenticated
+    const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
+
+    // If SKIP_BILLING is true, force billing status to active
+    if (process.env.SKIP_BILLING === 'true' && merchant) {
+      await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
+    }
+
+    if (!merchant) {
+      // Not authenticated — serve landing page, JS will redirect to auth
+      return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
+    }
+
+    // Force re-auth if old token (no refresh_token)
+    if (!merchant.refresh_token) {
+      console.log(`[Auth] ${shop} (via proxy) has non-expiring token, forcing re-auth`);
+      await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+      return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
+    }
+
+    // Authenticated — serve the dashboard directly through the iframe
+    res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
+  } catch (e) {
+    next(e);
   }
-
-  // Check if merchant is authenticated
-  const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
-
-  // If SKIP_BILLING is true, force billing status to active
-  if (process.env.SKIP_BILLING === 'true' && merchant) {
-    await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
-  }
-
-  if (!merchant) {
-    // Not authenticated — serve landing page, JS will redirect to auth
-    return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
-  }
-
-  // Force re-auth if old token (no refresh_token)
-  if (!merchant.refresh_token) {
-    console.log(`[Auth] ${shop} (via proxy) has non-expiring token, forcing re-auth`);
-    await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
-    return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
-  }
-
-  // Authenticated — serve the dashboard directly through the iframe
-  res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
 });
 
 // ─── API Routes ──────────────────────────────────────────────────────────
@@ -398,7 +413,7 @@ app.post('/api/sync-products', async (req, res) => {
   try {
     // Fetch all products from Shopify
     let products = [];
-    let url = `https://${shop}/admin/api/2026-07/products.json?limit=250&fields=id,title,variants`;
+    let url = `https://${shop}/admin/api/${API_VERSION}/products.json?limit=250&fields=id,title,variants`;
 
     while (url) {
       const response = await axios.get(url, {
@@ -421,7 +436,7 @@ app.post('/api/sync-products', async (req, res) => {
       // Fetch in chunks of 50 (Shopify limit for inventory_levels query params)
       for (let i = 0; i < variantIds.length; i += 50) {
         const chunk = variantIds.slice(i, i + 50).join(',');
-        let invUrl = `https://${shop}/admin/api/2026-07/inventory_levels.json?inventory_item_ids=${chunk}&limit=250`;
+        let invUrl = `https://${shop}/admin/api/${API_VERSION}/inventory_levels.json?inventory_item_ids=${chunk}&limit=250`;
         while (invUrl) {
           const invResponse = await axios.get(invUrl, {
             headers: { 'X-Shopify-Access-Token': token },
@@ -576,8 +591,8 @@ app.delete('/api/vendors/:id', async (req, res) => {
     });
   }
 
-  // Unset as preferred vendor on products
-  await db.run('UPDATE products SET preferred_vendor_id = NULL WHERE preferred_vendor_id = $1', [id]);
+  // Unset as preferred vendor on products (scoped to shop)
+  await db.run('UPDATE products SET preferred_vendor_id = NULL WHERE preferred_vendor_id = $1 AND shop = $2', [id, shop]);
   // Delete vendor
   await db.run('DELETE FROM vendors WHERE id = $1 AND shop = $2', [id, shop]);
 
@@ -749,7 +764,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     try {
       const token = await getToken(shop);
       // Get first location (most merchants have only one)
-      const locRes = await axios.get(`https://${shop}/admin/api/2026-07/locations.json`, {
+      const locRes = await axios.get(`https://${shop}/admin/api/${API_VERSION}/locations.json`, {
         headers: { 'X-Shopify-Access-Token': token },
         timeout: 10000,
       });
@@ -758,7 +773,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
       if (locationId) {
         for (const adj of adjustments) {
           await axios.post(
-            `https://${shop}/admin/api/2026-07/inventory_levels/adjust.json`,
+            `https://${shop}/admin/api/${API_VERSION}/inventory_levels/adjust.json`,
             {
               location_id: locationId,
               inventory_item_id: adj.inventory_item_id,
@@ -928,7 +943,7 @@ const CREATE_SUBSCRIPTION_MUTATION = `
 // Create a Shopify billing subscription (GraphQL) and return confirmation URL
 async function createCharge(shop, token) {
   const response = await axios.post(
-    `https://${shop}/admin/api/2026-07/graphql.json`,
+    `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
     {
       query: CREATE_SUBSCRIPTION_MUTATION,
       variables: {
@@ -1099,7 +1114,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
     if (dbChargeId) {
       try {
         const cancelResult = await axios.post(
-          `https://${shop}/admin/api/2026-07/graphql.json`,
+          `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
           {
             query: `mutation { appSubscriptionCancel(id: "${dbChargeId}") { userErrors { field message } } }`,
           },
@@ -1119,7 +1134,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
     // Also query existing subscriptions via GraphQL for diagnostics
     const query = `{ appSubscriptions(first:10) { edges { node { id status } } } }`;
     const result = await axios.post(
-      `https://${shop}/admin/api/2026-07/graphql.json`,
+      `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
       { query },
       { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
     );
@@ -1134,7 +1149,7 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
         if (!dbChargeId || id !== dbChargeId) { // skip if already tried above
           try {
             const cancelResult = await axios.post(
-              `https://${shop}/admin/api/2026-07/graphql.json`,
+              `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
               {
                 query: `mutation { appSubscriptionCancel(id: "${id}") { userErrors { field message } } }`,
               },
