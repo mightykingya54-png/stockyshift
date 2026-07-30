@@ -445,7 +445,7 @@ const SYNC_PRODUCTS_QUERY = `
         node {
           id
           title
-          variants(first: 100) {
+                  variants(first: 100) {
             edges {
               node {
                 id
@@ -499,7 +499,7 @@ app.post('/api/sync-products', async (req, res) => {
     while (hasNextPage) {
       const gqlRes = await axios.post(
         `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-        { query: SYNC_PRODUCTS_QUERY, variables: { first: 250, after } },
+        { query: SYNC_PRODUCTS_QUERY, variables: { first: 100, after } },
         { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
       );
 
