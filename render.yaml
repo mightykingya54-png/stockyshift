@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: stockyshift
+    name: stockyshift-app
     env: node
     buildCommand: npm install
     startCommand: node server.js
@@ -21,13 +21,13 @@ services:
       - key: SHOPIFY_API_SECRET
         sync: false
       - key: SHOPIFY_APP_URL
-        sync: false
+        value: https://stockyshift-app.onrender.com
       - key: SESSION_SECRET
         generateValue: true
       - key: PORT
         value: 10000
       - key: APP_URL
-        sync: false
+        value: https://stockyshift-app.onrender.com
       - key: DB_PATH
         value: /data/stockyshift.db
       # Production: Resend SMTP (update after creating account + verifying domain)
