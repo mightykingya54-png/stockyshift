@@ -415,7 +415,7 @@
       } catch (e) {
         btn.disabled = false;
         btn.textContent = 'Start 7-Day Free Trial';
-        showToast('Failed to start trial', 'error');
+        showToast('Failed to start trial: ' + e.message, 'error');
       }
     }
 

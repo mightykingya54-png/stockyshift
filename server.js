@@ -275,7 +275,10 @@ app.get('/auth/callback', async (req, res) => {
 // ─── App Config (exposes API key for App Bridge) ─────────────────────────
 
 app.get('/api/config', (req, res) => {
-  res.json({ api_key: SHOPIFY_API_KEY });
+  res.json({
+    api_key: SHOPIFY_API_KEY,
+    billing_test_mode: process.env.BILLING_TEST_MODE === 'true',
+  });
 });
 
 // ─── Embedded App Entry ──────────────────────────────────────────────────
