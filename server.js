@@ -1201,7 +1201,7 @@ cron.schedule('0 8 * * *', async () => {
 
           const emailText = `StockyShift — Low Stock Alert for ${merchant.shop}\n\n` +
             `The following products are below their reorder point:\n\n${lowStockList}\n\n` +
-            `Log in to StockyShift to create purchase orders:\n${process.env.APP_URL || 'https://stockyshift.onrender.com'}\n`;
+            `Log in to StockyShift to create purchase orders:\n${process.env.APP_URL || 'https://stockyshift.com'}\n`;
 
           const merchantInfo = await db.get('SELECT email FROM merchants WHERE shop = $1', [merchant.shop]);
           if (merchantInfo?.email) {
