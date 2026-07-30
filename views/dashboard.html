@@ -541,7 +541,8 @@
         `;
         document.getElementById('statsRow').innerHTML = statsHtml;
       } catch (e) {
-        document.getElementById('statsRow').innerHTML = `<div class="error">Failed to load stats</div>`;
+        console.error('Stats load error:', e);
+        document.getElementById('statsRow').innerHTML = `<div class="error">Failed to load stats: ${esc(e.message)}</div>`;
         const loading = document.getElementById('initialLoading');
         if (loading) loading.style.display = 'none';
       }
@@ -584,7 +585,8 @@
         html += '</table></div>';
         document.getElementById('tab-low-stock').innerHTML = html;
       } catch (e) {
-        document.getElementById('tab-low-stock').innerHTML = `<div class="error">Failed to load low stock data</div>`;
+        console.error('Low stock load error:', e);
+        document.getElementById('tab-low-stock').innerHTML = `<div class="error">Failed to load low stock data: ${esc(e.message)}</div>`;
       }
     }
 
