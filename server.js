@@ -10,8 +10,9 @@ const { generatePO } = require('./lib/pdf');
 const { sendPOEmail } = require('./lib/email');
 // Session store: SQLite (synchronous, persistent file)
 const SqliteStore = require('better-sqlite3-session-store')(session);
+const SESSION_DB_PATH = process.env.SESSION_DB_PATH || path.join(__dirname, 'stockyshift_sessions.db');
 const SessionStore = new SqliteStore({
-  client: require('better-sqlite3')(path.join(__dirname, 'stockyshift_sessions.db')),
+  client: require('better-sqlite3')(SESSION_DB_PATH),
   expired: { clear: true, intervalMs: 900000 },
 });
 
@@ -820,11 +821,13 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const po = await db.get('SELECT id FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
-  // Validate quantities: can't receive more than ordered
+  // Validate quantities: can't receive more than ordered, can't undo previous receives
   for (const item of items) {
     const lineItemCheck = await db.get('SELECT ordered_qty, received_qty FROM po_line_items WHERE id = $1 AND po_id = $2', [item.line_item_id, id]);
     if (!lineItemCheck) return res.status(400).json({ error: `Line item ${item.line_item_id} not found on this PO` });
-    const maxReceive = lineItemCheck.ordered_qty - (lineItemCheck.received_qty || 0);
+    if (item.received_qty < (lineItemCheck.received_qty || 0)) {
+      return res.status(400).json({ error: `Cannot reduce received quantity for this item (already received: ${lineItemCheck.received_qty || 0})` });
+    }
     if (item.received_qty > lineItemCheck.ordered_qty) {
       return res.status(400).json({ error: `Cannot receive more than ${lineItemCheck.ordered_qty} for this item (ordered: ${lineItemCheck.ordered_qty}, already received: ${lineItemCheck.received_qty || 0})` });
     }

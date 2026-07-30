@@ -30,6 +30,8 @@ services:
         value: https://stockyshift.com
       - key: DB_PATH
         value: /data/stockyshift.db
+      - key: SESSION_DB_PATH
+        value: /data/stockyshift_sessions.db
       # Production: Resend SMTP (update after creating account + verifying domain)
       - key: SMTP_HOST
         value: smtp.resend.com
