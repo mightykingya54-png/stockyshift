@@ -315,6 +315,27 @@
     const shop = urlParams.get('shop');
     document.getElementById('shopName').textContent = shop || '';
 
+    // ─── Shopify App Bridge (embedded mode) ────────────────────────
+    const isEmbedded = window.top !== window.self;
+    let __appBridgeToken = null;
+    let __appBridgeReady = null;
+
+    if (isEmbedded) {
+      __appBridgeReady = (async () => {
+        try {
+          const configRes = await fetch('/api/config');
+          const config = await configRes.json();
+          const host = urlParams.get('host');
+          if (!host) return;
+          const { createApp } = await import('https://unpkg.com/@shopify/app-bridge@3');
+          const app = createApp({ apiKey: config.api_key, host });
+          __appBridgeToken = await app.idToken();
+        } catch (e) {
+          console.warn('App Bridge init failed (non-fatal):', e);
+        }
+      })();
+    }
+
     // ─── Billing check (runs before anything else) ──────────────────
 
     async function checkBilling() {
@@ -409,13 +430,27 @@
     // ─── API helper ─────────────────────────────────────────────────
 
     async function api(path, opts = {}) {
+      // Wait for App Bridge token if embedded (non-blocking in standalone)
+      if (__appBridgeReady) await __appBridgeReady;
+
+      // Merge headers — session token takes priority when embedded
+      const headers = { 'Content-Type': 'application/json' };
+      if (__appBridgeToken) {
+        headers['Authorization'] = `Bearer ${__appBridgeToken}`;
+      }
+      // Merge caller-supplied headers on top
+      if (opts.headers) Object.assign(headers, opts.headers);
+
       const res = await fetch(path, {
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         ...opts,
+        // Don't let opts overwrite headers — already merged above
+        headers, // force our merged headers
       });
       if (res.status === 401) {
-        // Session expired — redirect to auth silently
-        window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+        if (shop) {
+          window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+        }
         throw new Error('Session expired');
       }
       if (!res.ok) {

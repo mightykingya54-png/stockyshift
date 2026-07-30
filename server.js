@@ -58,7 +58,7 @@ app.use(session({
   },
 }));
 
-// ─── Shopify HMAC Verification ────────────────────────────────────────────
+// ─── Shopify HMAC / Session Token Verification ────────────────────────────
 
 function verifyWebhook(body, hmacHeader) {
   if (!hmacHeader || !SHOPIFY_API_SECRET) return false;
@@ -72,6 +72,55 @@ function verifyWebhook(body, hmacHeader) {
   if (expected.length !== actual.length) return false;
   return crypto.timingSafeEqual(expected, actual);
 }
+
+// Verify a Shopify App Bridge session token (JWT) — no npm deps needed
+function verifySessionToken(token) {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+
+  let header, payload;
+  try {
+    header = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
+    payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+  } catch {
+    return null;
+  }
+
+  // Must be HS256
+  if (header.alg !== 'HS256') return null;
+  // Must not be expired
+  if (payload.exp < Date.now() / 1000) return null;
+  // Must be issued for our API key
+  if (payload.aud !== SHOPIFY_API_KEY) return null;
+
+  // Verify HMAC signature
+  const expectedSig = crypto
+    .createHmac('sha256', SHOPIFY_API_SECRET)
+    .update(parts[0] + '.' + parts[1])
+    .digest('base64url')
+    .replace(/=+$/, ''); // base64url has no padding
+
+  if (parts[2] !== expectedSig) return null;
+
+  // Extract shop from dest field: "https://{shop}.myshopify.com"
+  const dest = payload.dest || '';
+  const match = dest.match(/https:\/\/([^/]+)/);
+  if (!match) return null;
+
+  return { shop: match[1], payload };
+}
+
+// Middleware: authenticate via session token (Bearer) or fall back to session/params
+app.use((req, res, next) => {
+  const authHeader = req.headers['authorization'] || '';
+  if (authHeader.startsWith('Bearer ')) {
+    const result = verifySessionToken(authHeader.slice(7));
+    if (result) {
+      req.shop = result.shop;
+    }
+  }
+  next();
+});
 
 // Serve static dashboard
 app.use(express.static('views'));
@@ -108,12 +157,15 @@ app.get('/auth', async (req, res) => {
 
     // Validate shop exists before redirecting to Shopify
   try {
-    // Real store returns 401 (no auth, but exists). Fake store returns 404.
-    const shopCheck = await axios.get(`https://${shop}/admin/api/${API_VERSION}/shop.json`, {
-      timeout: 5000,
-      maxRedirects: 0,
-      validateStatus: () => true,
-    });
+    // Use GraphQL endpoint — real stores return 200 (auth error), fake stores return 404
+    const shopCheck = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+      { query: '{ shop { name } }' },
+      {
+        timeout: 5000,
+        validateStatus: () => true,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
     if (shopCheck.status === 404) {
       return res.send(`
       <!DOCTYPE html><html><head><meta charset="UTF-8">
@@ -246,12 +298,14 @@ app.get('/auth/callback', async (req, res) => {
       console.warn(`[Webhook] Could not register APP_UNINSTALLED for ${shop}: ${err.message}`);
     });
 
-    // Fetch merchant email from Shopify API (async, non-blocking)
-    axios.get(`https://${shop}/admin/shop.json`, {
-      headers: { 'X-Shopify-Access-Token': accessToken },
+    // Fetch merchant email from Shopify API (async, non-blocking, GraphQL)
+    axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+      query: `{ shop { email } }`,
+    }, {
+      headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' },
       timeout: 5000,
-    }).then(async shopRes => {
-      const email = shopRes.data?.shop?.email;
+    }).then(async gqlRes => {
+      const email = gqlRes.data?.data?.shop?.email;
       if (email) {
         await db.run('UPDATE merchants SET email = $1 WHERE shop = $2', [email, shop]);
       }
@@ -267,6 +321,12 @@ app.get('/auth/callback', async (req, res) => {
     console.error('OAuth error:', err.response?.data || err.message);
     res.status(500).send('Installation failed. Please try again.');
   }
+});
+
+// ─── App Config (exposes API key for App Bridge) ─────────────────────────
+
+app.get('/api/config', (req, res) => {
+  res.json({ api_key: SHOPIFY_API_KEY });
 });
 
 // ─── Embedded App Entry ──────────────────────────────────────────────────
@@ -359,6 +419,16 @@ app.get('/apps/stockyshift', async (req, res, next) => {
 
 // ─── API Routes ──────────────────────────────────────────────────────────
 
+// Helper: resolve shop from session token (embedded) → session cookie (standalone) → request param
+function getShop(req) {
+  // req.shop is set by the Bearer token middleware (embedded mode with App Bridge)
+  if (req.shop) return req.shop;
+  // Fall back to session (standalone mode with cookie)
+  if (req.session?.shop) return req.session.shop;
+  // Fall back to request body/query
+  return req.body?.shop || req.query?.shop || null;
+}
+
 // Helper: load merchant's access token with auto-refresh for expiring tokens (API 2026-07+)
 async function refreshShopifyToken(shop, oldRefreshToken) {
   const params = new URLSearchParams({
@@ -404,74 +474,116 @@ async function getToken(shop) {
   return merchant.access_token;
 }
 
-// Sync products from Shopify
-app.post('/api/sync-products', async (req, res) => {
-  const { shop } = req.body;
-  const token = await getToken(shop);
-  if (!token) return res.status(401).json({ error: 'Shop not installed' });
-
-  try {
-    // Fetch all products from Shopify
-    let products = [];
-    let url = `https://${shop}/admin/api/${API_VERSION}/products.json?limit=250&fields=id,title,variants`;
-
-    while (url) {
-      const response = await axios.get(url, {
-        headers: { 'X-Shopify-Access-Token': token },
-      });
-      products = products.concat(response.data.products);
-      url = null;
-      // Check for pagination (Link header)
-      const linkHeader = response.headers.link;
-      if (linkHeader) {
-        const matches = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
-        if (matches) url = matches[1];
-      }
-    }
-
-    // Get inventory levels for all products
-    const variantIds = products.flatMap(p => p.variants.map(v => v.inventory_item_id)).filter(Boolean);
-    let inventoryLevels = {};
-    if (variantIds.length > 0) {
-      // Fetch in chunks of 50 (Shopify limit for inventory_levels query params)
-      for (let i = 0; i < variantIds.length; i += 50) {
-        const chunk = variantIds.slice(i, i + 50).join(',');
-        let invUrl = `https://${shop}/admin/api/${API_VERSION}/inventory_levels.json?inventory_item_ids=${chunk}&limit=250`;
-        while (invUrl) {
-          const invResponse = await axios.get(invUrl, {
-            headers: { 'X-Shopify-Access-Token': token },
-          });
-          // Sum across locations (multi-location stores have one row per location per item)
-          invResponse.data.inventory_levels.forEach(level => {
-            inventoryLevels[level.inventory_item_id] = (inventoryLevels[level.inventory_item_id] || 0) + level.available;
-          });
-          // Follow pagination for inventory levels
-          invUrl = null;
-          const linkHeader = invResponse.headers.link;
-          if (linkHeader) {
-            const matches = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
-            if (matches) invUrl = matches[1];
+// GraphQL query for syncing products with variants and inventory (no REST API)
+const SYNC_PRODUCTS_QUERY = `
+  query($first: Int!, $after: String) {
+    products(first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          id
+          title
+          variants(first: 100) {
+            edges {
+              node {
+                id
+                sku
+                inventoryItem {
+                  id
+                  inventoryLevels(first: 10) {
+                    edges {
+                      node { available }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
     }
+  }
+`;
 
-    // Upsert products into local DB
+// Helper: extract numeric ID from Shopify GraphQL global ID (e.g. "gid://shopify/Product/123")
+function gidToId(gid) {
+  const parts = (gid || '').split('/');
+  return parseInt(parts[parts.length - 1]) || null;
+}
+
+// Helper: convert numeric ID to Shopify GraphQL global ID
+function idToGid(type, id) {
+  if (!id) return null;
+  return `gid://shopify/${type}/${id}`;
+}
+
+// Sync products from Shopify
+app.post('/api/sync-products', async (req, res) => {
+  const shop = getShop(req);
+  const token = await getToken(shop);
+  if (!token) return res.status(401).json({ error: 'Shop not installed' });
+
+  try {
+    // Fetch all products + variants + inventory via GraphQL
+    const allVariants = [];
+    let hasNextPage = true;
+    let after = null;
+
+    while (hasNextPage) {
+      const gqlRes = await axios.post(
+        `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+        { query: SYNC_PRODUCTS_QUERY, variables: { first: 250, after } },
+        { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+      );
+
+      const data = gqlRes.data?.data?.products;
+      if (!data) {
+        const errs = gqlRes.data?.errors;
+        throw new Error(errs ? errs.map(e => e.message).join('; ') : 'GraphQL returned no data');
+      }
+
+      for (const edge of data.edges) {
+        const product = edge.node;
+        const productId = gidToId(product.id);
+        for (const vEdge of product.variants.edges) {
+          const variant = vEdge.node;
+          // Sum available across all locations
+          let available = 0;
+          if (variant.inventoryItem?.inventoryLevels?.edges) {
+            for (const level of variant.inventoryItem.inventoryLevels.edges) {
+              available += level.node.available;
+            }
+          }
+          allVariants.push({
+            product_id: productId,
+            variant_id: gidToId(variant.id),
+            inventory_item_id: gidToId(variant.inventoryItem?.id),
+            shop,
+            title: product.title,
+            sku: variant.sku || '',
+            current_stock: available,
+          });
+        }
+      }
+
+      hasNextPage = data.pageInfo.hasNextPage;
+      after = data.pageInfo.endCursor;
+    }
+
+    // Upsert into local DB
     let variantCount = 0;
     await db.transaction(async (tx) => {
-      for (const product of products) {
-        for (const variant of product.variants) {
-          await tx.run(`
-            INSERT INTO products (shopify_product_id, shopify_variant_id, inventory_item_id, shop, title, sku, current_stock)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT(shop, shopify_variant_id) DO UPDATE SET
-              title = excluded.title,
-              sku = excluded.sku,
-              current_stock = excluded.current_stock,
-              inventory_item_id = excluded.inventory_item_id
-          `, [product.id, variant.id, variant.inventory_item_id, shop, product.title, variant.sku || '', inventoryLevels[variant.inventory_item_id] || 0]);
-          variantCount++;
-        }
+      for (const v of allVariants) {
+        await tx.run(`
+          INSERT INTO products (shopify_product_id, shopify_variant_id, inventory_item_id, shop, title, sku, current_stock)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT(shop, shopify_variant_id) DO UPDATE SET
+            title = excluded.title,
+            sku = excluded.sku,
+            current_stock = excluded.current_stock,
+            inventory_item_id = excluded.inventory_item_id
+        `, [v.product_id, v.variant_id, v.inventory_item_id, shop, v.title, v.sku, v.current_stock]);
+        variantCount++;
       }
     });
 
@@ -486,7 +598,7 @@ app.post('/api/sync-products', async (req, res) => {
 
 // Get low stock products (below reorder point)
 app.get('/api/low-stock', async (req, res) => {
-  const { shop } = req.query;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
@@ -507,7 +619,7 @@ app.get('/api/low-stock', async (req, res) => {
 
 // Get all products
 app.get('/api/products', async (req, res) => {
-  const { shop } = req.query;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
@@ -524,7 +636,8 @@ app.get('/api/products', async (req, res) => {
 
 // Update reorder point for a product
 app.post('/api/products/reorder-point', async (req, res) => {
-  const { id, reorder_point, preferred_vendor_id, shop } = req.body;
+  const shop = getShop(req);
+  const { id, reorder_point, preferred_vendor_id } = req.body;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
@@ -538,7 +651,7 @@ app.post('/api/products/reorder-point', async (req, res) => {
 // ─── Vendor Routes ───────────────────────────────────────────────────────
 
 app.get('/api/vendors', async (req, res) => {
-  const { shop } = req.query;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
@@ -547,7 +660,8 @@ app.get('/api/vendors', async (req, res) => {
 });
 
 app.post('/api/vendors', async (req, res) => {
-  const { shop, name, email, min_order_amount, notes } = req.body;
+  const shop = getShop(req);
+  const { name, email, min_order_amount, notes } = req.body;
   if (!shop || !name || !email) return res.status(400).json({ error: 'Missing required fields' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
@@ -562,7 +676,8 @@ app.post('/api/vendors', async (req, res) => {
 // Update vendor
 app.put('/api/vendors/:id', async (req, res) => {
   const { id } = req.params;
-  const { shop, name, email, min_order_amount, notes } = req.body;
+  const shop = getShop(req);
+  const { name, email, min_order_amount, notes } = req.body;
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
   if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
@@ -579,7 +694,7 @@ app.put('/api/vendors/:id', async (req, res) => {
 // Delete vendor
 app.delete('/api/vendors/:id', async (req, res) => {
   const { id } = req.params;
-  const { shop } = req.body;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
@@ -604,7 +719,8 @@ app.delete('/api/vendors/:id', async (req, res) => {
 
 
 app.post('/api/purchase-orders', async (req, res) => {
-  const { shop, vendor_id, items, notes } = req.body;
+  const shop = getShop(req);
+  const { vendor_id, items, notes } = req.body;
   if (!shop || !vendor_id || !items?.length) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
@@ -645,7 +761,7 @@ app.post('/api/purchase-orders', async (req, res) => {
 // Send PO email
 app.post('/api/purchase-orders/:id/send', async (req, res) => {
   const { id } = req.params;
-  const { shop } = req.body;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
@@ -695,7 +811,8 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
 // Receive against PO (also updates inventory in Shopify)
 app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const { id } = req.params;
-  const { shop, items } = req.body; // [{line_item_id, received_qty}]
+  const shop = getShop(req);
+  const { items } = req.body; // [{line_item_id, received_qty}]
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
@@ -763,21 +880,37 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     let shopifySuccess = false;
     try {
       const token = await getToken(shop);
-      // Get first location (most merchants have only one)
-      const locRes = await axios.get(`https://${shop}/admin/api/${API_VERSION}/locations.json`, {
-        headers: { 'X-Shopify-Access-Token': token },
-        timeout: 10000,
-      });
-      const locationId = locRes.data?.locations?.[0]?.id;
+      // Get first location via GraphQL (most merchants have only one)
+      const locRes = await axios.post(
+        `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+        { query: `{ locations(first: 1) { edges { node { id } } } }` },
+        { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
+      );
+      const locationId = locRes.data?.data?.locations?.edges?.[0]?.node?.id;
 
       if (locationId) {
         for (const adj of adjustments) {
+          const mutation = `
+            mutation($input: InventoryAdjustQuantitiesInput!) {
+              inventoryAdjustQuantities(input: $input) {
+                userErrors { field message }
+              }
+            }
+          `;
           await axios.post(
-            `https://${shop}/admin/api/${API_VERSION}/inventory_levels/adjust.json`,
+            `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
             {
-              location_id: locationId,
-              inventory_item_id: adj.inventory_item_id,
-              available_adjustment: adj.delta,
+              query: mutation,
+              variables: {
+                input: {
+                  reason: "unknown",
+                  changes: [{
+                    inventoryItemId: idToGid('InventoryItem', adj.inventory_item_id),
+                    locationId: locationId,
+                    delta: adj.delta,
+                  }],
+                },
+              },
             },
             {
               headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
@@ -786,7 +919,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
           );
         }
         shopifySuccess = true;
-        console.log(`[Receive] Shopify inventory updated for ${shop}: ${adjustments.length} items adjusted at location ${locationId}`);
+        console.log(`[Receive] Shopify inventory updated for ${shop}: ${adjustments.length} items adjusted at location ${locRes.data?.data?.locations?.edges?.[0]?.node?.id}`);
       } else {
         console.warn(`[Receive] No locations found for ${shop} — Shopify inventory not updated`);
       }
@@ -806,7 +939,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
 });
 
 app.get('/api/purchase-orders', async (req, res) => {
-  const { shop } = req.query;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
@@ -824,7 +957,7 @@ app.get('/api/purchase-orders', async (req, res) => {
 // Get single PO with line items
 app.get('/api/purchase-orders/:id', async (req, res) => {
   const { id } = req.params;
-  const { shop } = req.query;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
@@ -850,7 +983,7 @@ app.get('/api/purchase-orders/:id', async (req, res) => {
 // Delete a purchase order (only draft POs can be deleted)
 app.delete('/api/purchase-orders/:id', async (req, res) => {
   const { id } = req.params;
-  const { shop } = req.body;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
@@ -977,7 +1110,7 @@ async function createCharge(shop, token) {
 
 // Get billing status for the dashboard
 app.get('/api/billing/status', async (req, res) => {
-  const { shop } = req.query;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
   const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1', [shop]);
@@ -1004,7 +1137,7 @@ app.get('/api/billing/status', async (req, res) => {
 
 // Initiate billing (create charge, redirect to Shopify)
 app.post('/api/billing/create', async (req, res) => {
-  const { shop } = req.body;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
 
   const token = await getToken(shop);
@@ -1097,7 +1230,7 @@ app.get('/billing/confirm', async (req, res) => {
 
 // ─── Cancel pending subscriptions (for stuck billing) ─────────────────────
 app.post('/api/billing/cancel-pending', async (req, res) => {
-  const { shop } = req.body;
+  const shop = getShop(req);
   if (!shop) return res.status(400).json({ error: 'Missing shop' });
   const token = await getToken(shop);
   if (!token) return res.status(401).json({ error: 'Not installed' });
