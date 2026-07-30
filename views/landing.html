@@ -76,8 +76,11 @@
       signal: AbortSignal.timeout(5000)
     })
       .then(r => {
+        // Preserve ALL original query params (host, id_token, etc.)
+        // so App Bridge can initialize in the dashboard
+        const fullQuery = window.location.search;
         if (r.ok) {
-          window.top.location.href = '/?shop=' + encodeURIComponent(shop);
+          window.top.location.href = '/' + fullQuery;
         } else {
           window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
         }
