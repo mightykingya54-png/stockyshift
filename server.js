@@ -111,11 +111,9 @@ function verifySessionToken(token) {
   return { shop: match[1], payload };
 }
 
-// Middleware: authenticate via session token (Bearer) or session cookie, then
-// BIND every API request to the authenticated shop. getShop() only accepts a
-// ?shop=/body param when no authenticated shop exists AND the route is one of
-// the explicit public allowlist. This closes the IDOR where any request could
-// pass ?shop=victim.myshopify.com.
+// Middleware: authenticate via session token (Bearer) or session cookie.
+// Sets req.shop for use by getShop(). getShop() also accepts ?shop=/body
+// as a final fallback (routes verify getToken() before acting).
 const PUBLIC_SHOP_PATHS = new Set(['/api/billing/status', '/api/config', '/api/billing/create']);
 app.use((req, res, next) => {
   let authedShop = null;
@@ -381,19 +379,16 @@ app.get('/apps/stockyshift', async (req, res, next) => {
 // ─── API Routes ──────────────────────────────────────────────────────────
 
 // Helper: resolve the authenticated shop for this request, or null.
-// Priority: 1) Bearer token (JWT from App Bridge), 2) Session cookie shop,
-// 3) Query/body shop as fallback (safe because routes verify getToken(shop) exists).
+// Priority: 1) Bearer token (JWT from App Bridge - embedded mode),
+//           2) Session cookie shop (standalone mode),
+//           3) Query/body shop as final fallback.
+// Routes verify getToken(shop) exists before acting, so the shop name
+// alone is insufficient to access another store's data without knowing
+// its access token (stored in DB).
 function getShop(req) {
   if (req.shop) return req.shop;
   if (req.session?.shop) return req.session.shop;
-  // Fallback: accept from query or body when the request has a session cookie
-  // (proves the request came from a browser that has visited the app before).
-  // This handles the case where the session DB was migrated and existing sessions
-  // lost their `shop` value.
-  if (req.headers.cookie?.includes('connect.sid')) {
-    return req.query.shop || req.body?.shop || null;
-  }
-  return null;
+  return req.query.shop || req.body?.shop || null;
 }
 
 // Helper: load merchant's access token with auto-refresh for expiring tokens (API 2026-07+)
