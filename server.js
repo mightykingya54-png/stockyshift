@@ -212,11 +212,11 @@ app.get('/auth/callback', async (req, res) => {
         is_active = 1,
         uninstalled_at = NULL,
         billing_status = CASE
-          WHEN billing_status IN ('expired', 'cancelled') THEN 'pending'
+          WHEN billing_status NOT IN ('active') THEN 'pending'
           ELSE billing_status
         END,
         trial_ends_at = CASE
-          WHEN billing_status IN ('expired', 'cancelled') THEN NULL
+          WHEN billing_status NOT IN ('active') THEN NULL
           ELSE trial_ends_at
         END
     `, [shop, accessToken, refreshToken, expiresAt]);
