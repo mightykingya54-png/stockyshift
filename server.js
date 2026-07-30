@@ -499,7 +499,7 @@ app.post('/api/sync-products', async (req, res) => {
     while (hasNextPage) {
       const gqlRes = await axios.post(
         `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-        { query: SYNC_PRODUCTS_QUERY, variables: { first: 100, after } },
+        { query: SYNC_PRODUCTS_QUERY, variables: { first: 80, after } },
         { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
       );
 
