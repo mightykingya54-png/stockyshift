@@ -144,6 +144,8 @@
       align-items: center;
     }
     .modal-overlay.show { display: flex; }
+    #confirmOverlay { display: none; justify-content: center; align-items: center; }
+    #confirmOverlay.show { display: flex; }
     .modal {
       background: white;
       border-radius: 12px;
@@ -263,7 +265,7 @@
       <span class="shop-name" id="shopName"></span>
     </div>
     <div>
-      <button class="btn btn-primary btn-sm" onclick="syncProducts()">⟳ Sync Products</button>
+      <button class="btn btn-primary btn-sm" id="syncBtn" onclick="syncProducts()" style="display:none">⟳ Sync Products</button>
     </div>
   </div>
 
@@ -293,6 +295,17 @@
   <!-- Modal -->
   <div class="modal-overlay" id="modalOverlay">
     <div class="modal" id="modalContent"></div>
+  </div>
+
+  <!-- Confirm Dialog -->
+  <div class="modal-overlay" id="confirmOverlay">
+    <div class="modal" style="max-width:400px;padding:24px;text-align:center">
+      <p id="confirmMsg" style="font-size:15px;margin:0 0 20px 0"></p>
+      <div class="btn-row" style="justify-content:center">
+        <button class="btn btn-outline" onclick="confirmResponse(false)">Cancel</button>
+        <button class="btn btn-success" id="confirmOkBtn" onclick="confirmResponse(true)">OK</button>
+      </div>
+    </div>
   </div>
 
   </div><!-- /appContent -->
@@ -400,6 +413,11 @@
         headers: { 'Content-Type': 'application/json' },
         ...opts,
       });
+      if (res.status === 401) {
+        // Session expired — redirect to auth silently
+        window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+        throw new Error('Session expired');
+      }
       if (!res.ok) {
         let detail = `HTTP ${res.status}`;
         try { const body = await res.json(); detail = String(body.error || body.message || detail); } catch (_) {}
@@ -508,7 +526,9 @@
         const data = await api(`/api/products?shop=${shop}`);
         const vendors = await api(`/api/vendors?shop=${shop}`);
 
+        const syncBtn = document.getElementById('syncBtn');
         if (data.length === 0) {
+          if (syncBtn) syncBtn.style.display = '';
           document.getElementById('tab-products').innerHTML = `
             <div class="card">
               <h2>No products yet</h2>
@@ -518,6 +538,7 @@
           `;
           return;
         }
+        if (syncBtn) syncBtn.style.display = 'none';
 
         let html = `<div class="card"><h2>📦 ${data.length} Products</h2><table>
           <tr><th>Product</th><th>SKU</th><th>Stock</th><th>Reorder Point</th><th>Vendor</th><th></th></tr>`;
@@ -692,7 +713,7 @@
     }
 
     async function deleteVendor(id) {
-      if (!confirm('Delete this vendor? This cannot be undone. Vendors with existing POs cannot be deleted.')) return;
+      if (!(await showConfirm('Delete this vendor? Vendors with existing POs cannot be deleted.', 'Delete'))) return;
       try {
         await api(`/api/vendors/${id}`, {
           method: 'DELETE',
@@ -792,7 +813,7 @@
         <label>Quantity to order</label>
         <input type="number" id="poQty" value="${Math.max(p.reorder_point - p.current_stock, 1)}" min="1">
         <label>Unit cost ($, optional)</label>
-        <input type="number" id="poCost" value="${p.unit_cost || ''}" step="0.01">
+        <input type="number" id="poCost" value="${p.unit_cost || ''}" step="0.01" min="0">
         <label>Notes (optional)</label>
         <textarea id="poNotes" rows="2"></textarea>
         <div class="btn-row">
@@ -869,7 +890,7 @@
               <th style="width:12%">Stock</th>
               <th style="width:12%">Reorder</th>
               <th style="width:18%">Qty</th>
-              <th style="width:18%">Cost</th>
+              <th style="width:18%">Cost ($)</th>
             </tr>
             ${productRows}
           </table>
@@ -957,7 +978,7 @@
     const sendingPOs = new Set();
     async function sendPO(id) {
       if (sendingPOs.has(id)) return; // already sending
-      if (!confirm('Send this purchase order to the vendor via email?')) return;
+      if (!(await showConfirm('Send this purchase order to the vendor via email?', 'Send'))) return;
       sendingPOs.add(id);
       try {
         await api(`/api/purchase-orders/${id}/send`, {
@@ -974,7 +995,7 @@
     }
 
     async function deletePO(id) {
-      if (!confirm('Delete this draft purchase order? This cannot be undone.')) return;
+      if (!(await showConfirm('Delete this draft purchase order? This cannot be undone.', 'Delete'))) return;
       try {
         await api(`/api/purchase-orders/${id}`, {
           method: 'DELETE',
@@ -1087,6 +1108,27 @@
     document.getElementById('modalOverlay').addEventListener('click', (e) => {
       if (e.target === e.currentTarget) closeModal();
     });
+    document.getElementById('confirmOverlay').addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) confirmResponse(false);
+    });
+
+    // ─── Confirm Dialog ─────────────────────────────────────────────
+
+    let _confirmResolve = null;
+    window.confirmResponse = function(ok) {
+      document.getElementById('confirmOverlay').classList.remove('show');
+      if (_confirmResolve) _confirmResolve(ok);
+      _confirmResolve = null;
+    };
+
+    function showConfirm(msg, okLabel = 'OK') {
+      return new Promise((resolve) => {
+        _confirmResolve = resolve;
+        document.getElementById('confirmMsg').textContent = msg;
+        document.getElementById('confirmOkBtn').textContent = okLabel;
+        document.getElementById('confirmOverlay').classList.add('show');
+      });
+    }
 
     // ─── Init ───────────────────────────────────────────────────────
 
