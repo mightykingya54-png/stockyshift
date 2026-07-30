@@ -41,6 +41,6 @@ services:
         sync: false
       - key: FROM_EMAIL
         value: purchase-orders@stockyshift.com
-      # Billing: set to "false" for real charges. Use "true" only for local dev.
+      # Billing: set to "false" for real charges. Use "true" while in development.
       - key: BILLING_TEST_MODE
-        value: "false"
+        value: "true"

@@ -201,12 +201,10 @@ app.get('/auth/callback', async (req, res) => {
       ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
       : null;
 
-    // Store merchant in database (with expiring token support + auto-start trial)
-    const trialEnd = new Date();
-    trialEnd.setDate(trialEnd.getDate() + 7);
+    // Store merchant in database — set billing to 'pending' so they see the trial offer page first
     await db.run(`
       INSERT INTO merchants (shop, access_token, refresh_token, expires_at, billing_status, trial_ends_at)
-      VALUES ($1, $2, $3, $4, 'trial', $5)
+      VALUES ($1, $2, $3, $4, 'pending', NULL)
       ON CONFLICT(shop) DO UPDATE SET
         access_token = $2,
         refresh_token = $3,
@@ -214,14 +212,14 @@ app.get('/auth/callback', async (req, res) => {
         is_active = 1,
         uninstalled_at = NULL,
         billing_status = CASE
-          WHEN billing_status IN ('pending', 'expired', 'cancelled') THEN 'trial'
+          WHEN billing_status IN ('expired', 'cancelled') THEN 'pending'
           ELSE billing_status
         END,
         trial_ends_at = CASE
-          WHEN billing_status IN ('pending', 'expired', 'cancelled') THEN $5
+          WHEN billing_status IN ('expired', 'cancelled') THEN NULL
           ELSE trial_ends_at
         END
-    `, [shop, accessToken, refreshToken, expiresAt, trialEnd.toISOString()]);
+    `, [shop, accessToken, refreshToken, expiresAt]);
 
     // Register uninstall webhook (async, non-blocking)
     axios.post(`https://${shop}/admin/api/2026-07/graphql.json`, {
