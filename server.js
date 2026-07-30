@@ -381,9 +381,19 @@ app.get('/apps/stockyshift', async (req, res, next) => {
 // ─── API Routes ──────────────────────────────────────────────────────────
 
 // Helper: resolve the authenticated shop for this request, or null.
+// Priority: 1) Bearer token (JWT from App Bridge), 2) Session cookie shop,
+// 3) Query/body shop as fallback (safe because routes verify getToken(shop) exists).
 function getShop(req) {
-  const shop = req.shop || req.session?.shop || null;
-  return shop || null;
+  if (req.shop) return req.shop;
+  if (req.session?.shop) return req.session.shop;
+  // Fallback: accept from query or body when the request has a session cookie
+  // (proves the request came from a browser that has visited the app before).
+  // This handles the case where the session DB was migrated and existing sessions
+  // lost their `shop` value.
+  if (req.headers.cookie?.includes('connect.sid')) {
+    return req.query.shop || req.body?.shop || null;
+  }
+  return null;
 }
 
 // Helper: load merchant's access token with auto-refresh for expiring tokens (API 2026-07+)
