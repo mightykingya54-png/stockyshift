@@ -138,11 +138,17 @@ app.use(express.static('views'));
 // ─── Static Pages ─────────────────────────────────────────────────────────
 
 app.get('/privacy', (req, res) => {
-  res.sendFile(path.join(__dirname, 'views', 'privacy.html'));
+  const CONTACT_PRIVACY = process.env.CONTACT_PRIVACY || 'privacy@stockyshift.com';
+  let html = require('fs').readFileSync(path.join(__dirname, 'views', 'privacy.html'), 'utf8');
+  html = html.replace(/privacy@stockyshift\.com/g, CONTACT_PRIVACY);
+  res.send(html);
 });
 
 app.get('/terms', (req, res) => {
-  res.sendFile(path.join(__dirname, 'views', 'terms.html'));
+  const CONTACT_LEGAL = process.env.CONTACT_LEGAL || 'legal@stockyshift.com';
+  let html = require('fs').readFileSync(path.join(__dirname, 'views', 'terms.html'), 'utf8');
+  html = html.replace(/legal@stockyshift\.com/g, CONTACT_LEGAL);
+  res.send(html);
 });
 
 // ─── Shopify OAuth ────────────────────────────────────────────────────────
@@ -275,6 +281,9 @@ app.get('/auth/callback', async (req, res) => {
 // ─── App Config (exposes API key for App Bridge) ─────────────────────────
 
 app.get('/api/config', (req, res) => {
+  if (!SHOPIFY_API_KEY) {
+    return res.status(500).json({ error: 'Server misconfigured: missing SHOPIFY_API_KEY' });
+  }
   res.json({
     api_key: SHOPIFY_API_KEY,
     billing_test_mode: process.env.BILLING_TEST_MODE === 'true',
@@ -452,6 +461,8 @@ const SYNC_PRODUCTS_QUERY = `
                 sku
                 inventoryItem {
                   id
+                  # NOTE: Limited to first 10 locations. Merchants with 11+ locations
+                  # will get incomplete inventory counts. Future fix: paginate all locations.
                   inventoryLevels(first: 10) {
                     edges {
                       node {
@@ -732,10 +743,12 @@ app.post('/api/purchase-orders', async (req, res) => {
     const newPoId = poResult.id;
 
     for (const item of items) {
+      // Fetch product title/sku at creation time (denormalized — survives product deletion)
+      const product = await tx.get('SELECT title, sku FROM products WHERE id = $1', [item.product_id]);
       await tx.run(`
-        INSERT INTO po_line_items (po_id, product_id, ordered_qty, unit_cost)
-        VALUES ($1, $2, $3, $4)
-      `, [newPoId, item.product_id, item.ordered_qty, item.unit_cost || 0]);
+        INSERT INTO po_line_items (po_id, product_id, product_title, product_sku, ordered_qty, unit_cost)
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [newPoId, item.product_id, product?.title || '', product?.sku || '', item.ordered_qty, item.unit_cost || 0]);
     }
 
     return newPoId;
@@ -759,10 +772,15 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
 
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
+  // Use denormalized product_title/product_sku (stored at PO creation time)
+  // so POs are not broken if the product is later deleted. Fall back to JOIN
+  // for POs created before the denormalization migration.
   const lineItems = await db.all(`
-    SELECT pli.*, p.title, p.sku
+    SELECT pli.*,
+           COALESCE(pli.product_title, p.title) AS title,
+           COALESCE(pli.product_sku, p.sku) AS sku
     FROM po_line_items pli
-    JOIN products p ON pli.product_id = p.id
+    LEFT JOIN products p ON pli.product_id = p.id
     WHERE pli.po_id = $1
   `, [id]);
 
@@ -817,14 +835,20 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     }
   }
 
+  // Snapshot old received_qty values so we can roll back if Shopify push fails
+  const oldValues = {};
+  for (const item of items) {
+    const row = await db.get('SELECT received_qty FROM po_line_items WHERE id = $1 AND po_id = $2', [item.line_item_id, id]);
+    oldValues[item.line_item_id] = row?.received_qty || 0;
+  }
+
   // Collect inventory adjustments needed (computed during transaction below)
   const adjustments = [];
 
   await db.transaction(async (tx) => {
     for (const item of items) {
-      // Get previous received_qty to calculate delta (supports partial receives)
-      const before = tx.get('SELECT received_qty FROM po_line_items WHERE id = $1 AND po_id = $2', [item.line_item_id, id]);
-      const delta = item.received_qty - (before?.received_qty || 0);
+      const oldQty = oldValues[item.line_item_id] || 0;
+      const delta = item.received_qty - oldQty;
 
       await tx.run(`
         UPDATE po_line_items SET received_qty = $1 WHERE id = $2 AND po_id = $3
@@ -843,6 +867,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
           adjustments.push({
             inventory_item_id: lineItem.inventory_item_id,
             product_id: lineItem.product_id,
+            line_item_id: item.line_item_id,
             delta,
           });
         }
@@ -855,21 +880,24 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     `, [id]);
 
     const allReceived = allItems.every(i => i.received_qty >= i.ordered_qty);
-    const status = allReceived ? 'received' : 'partial';
 
-    tx.run(`
-      UPDATE purchase_orders SET status = $1, received_at = CURRENT_TIMESTAMP WHERE id = $2
-    `, [status, id]);
+    if (allReceived) {
+      tx.run(`
+        UPDATE purchase_orders SET status = 'received', received_at = CURRENT_TIMESTAMP WHERE id = $1
+      `, [id]);
+    } else {
+      tx.run(`
+        UPDATE purchase_orders SET status = 'partial' WHERE id = $1
+      `, [id]);
+    }
   });
 
-  // After transaction: push inventory adjustments to Shopify, and only update
-  // local stock for items whose push actually succeeded. If a push fails, the
-  // local stock is left unchanged so the next sync / retry keeps the data
-  // consistent (previously we bumped local stock even on Shopify failure,
-  // which desynced stock and silently stopped low-stock alerts from firing).
+  // After transaction: push inventory adjustments to Shopify. If a push fails,
+  // roll back the affected line item's received_qty to its old value so the UI
+  // stays consistent with actual inventory.
   if (adjustments.length > 0) {
     let locationId = null;
-    let shopifyReachable = true;
+    const failedLineItemIds = new Set();
     try {
       const token = await getToken(shop);
       // Get first location via GraphQL (most merchants have only one)
@@ -919,23 +947,36 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
             await db.run('UPDATE products SET current_stock = current_stock + $1 WHERE id = $2 AND shop = $3',
               [adj.delta, adj.product_id, shop]);
           } catch (itemErr) {
-            shopifyReachable = false;
+            failedLineItemIds.add(adj.line_item_id);
             console.error(`[Receive] Failed to push inventory for item ${adj.inventory_item_id} (${shop}):`, itemErr.message);
           }
         }
         console.log(`[Receive] Shopify inventory updated for ${shop} at location ${locationId}`);
       } else {
-        shopifyReachable = false;
+        // No location found — all adjustments failed
+        for (const adj of adjustments) {
+          failedLineItemIds.add(adj.line_item_id);
+        }
         console.warn(`[Receive] No locations found for ${shop} — Shopify inventory not updated`);
       }
     } catch (err) {
-      shopifyReachable = false;
+      // Entire Shopify push failed — all adjustments need rollback
+      for (const adj of adjustments) {
+        failedLineItemIds.add(adj.line_item_id);
+      }
       console.error(`[Receive] Shopify inventory update failed for ${shop}:`, err.response?.data || err.message);
     }
 
-    if (!shopifyReachable) {
-      console.warn(`[Receive] One or more inventory adjustments were NOT pushed to Shopify for ${shop}. ` +
-        `Local stock was only applied to successfully-synced items.`);
+    // Roll back received_qty for any items whose Shopify push failed
+    if (failedLineItemIds.size > 0) {
+      for (const lineItemId of failedLineItemIds) {
+        const oldQty = oldValues[lineItemId] || 0;
+        await db.run(`
+          UPDATE po_line_items SET received_qty = $1 WHERE id = $2 AND po_id = $3
+        `, [oldQty, lineItemId, id]);
+        console.log(`[Receive] Rolled back received_qty for line item ${lineItemId} to ${oldQty} (Shopify push failed)`);
+      }
+      console.warn(`[Receive] ${failedLineItemIds.size} item(s) rolled back. Total pushed: ${adjustments.length - failedLineItemIds.size} of ${adjustments.length}.`);
     }
   }
 
@@ -974,10 +1015,15 @@ app.get('/api/purchase-orders/:id', async (req, res) => {
 
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
+  // Use denormalized product_title/product_sku (survives product deletion).
+  // Fall back to JOIN for POs created before the migration.
   const lineItems = await db.all(`
-    SELECT pli.*, p.title, p.sku, p.current_stock
+    SELECT pli.*,
+           COALESCE(pli.product_title, p.title) AS title,
+           COALESCE(pli.product_sku, p.sku) AS sku,
+           p.current_stock
     FROM po_line_items pli
-    JOIN products p ON pli.product_id = p.id
+    LEFT JOIN products p ON pli.product_id = p.id
     WHERE pli.po_id = $1
   `, [id]);
 
@@ -1357,8 +1403,9 @@ cron.schedule('0 8 * * *', async () => {
   try {
     // Only alert paying/trial-active merchants — skip expired, cancelled, declined
     const merchants = await db.all(`
-      SELECT shop, billing_status, trial_ends_at FROM merchants
+      SELECT shop, email, billing_status, trial_ends_at FROM merchants
       WHERE is_active = 1
+        AND email IS NOT NULL
         AND (
           billing_status = 'active'
           OR (billing_status = 'trial' AND trial_ends_at IS NOT NULL AND datetime(trial_ends_at) > datetime('now'))
@@ -1376,21 +1423,24 @@ cron.schedule('0 8 * * *', async () => {
           AND p.current_stock <= p.reorder_point
       `, [merchant.shop]);
 
-      if (lowStock.length > 0) {
+        if (lowStock.length > 0) {
         console.log(`[Cron] ${merchant.shop}: ${lowStock.length} products below reorder point`);
         try {
           const lowStockList = lowStock.map(p =>
             `- ${p.title} (SKU: ${p.sku}) — Stock: ${p.current_stock}, Reorder at: ${p.reorder_point}`
           ).join('\n');
 
+          // Link directly to the embedded app in Shopify admin (not standalone landing page)
+          const storeName = merchant.shop.replace('.myshopify.com', '');
+          const adminUrl = `https://admin.shopify.com/store/${storeName}/apps/stockyshift`;
+
           const emailText = `StockyShift — Low Stock Alert for ${merchant.shop}\n\n` +
             `The following products are below their reorder point:\n\n${lowStockList}\n\n` +
-            `Log in to StockyShift to create purchase orders:\n${process.env.APP_URL || 'https://stockyshift.com'}\n`;
+            `Open StockyShift in your Shopify admin to create purchase orders:\n${adminUrl}\n`;
 
-          const merchantInfo = await db.get('SELECT email FROM merchants WHERE shop = $1', [merchant.shop]);
-          if (merchantInfo?.email) {
+          if (merchant.email) {
             await sendPOEmail({
-              to: merchantInfo.email,
+              to: merchant.email,
               subject: `Low Stock Alert — ${lowStock.length} products need reordering`,
               text: emailText,
             });

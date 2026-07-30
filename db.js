@@ -98,6 +98,9 @@ try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN trial_ends_at DATETIME;`);
 try { sqliteDb.exec(`ALTER TABLE products ADD COLUMN inventory_item_id INTEGER;`); } catch (_) {}
 try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN refresh_token TEXT;`); } catch (_) {}
 try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN expires_at TEXT;`); } catch (_) {}
+// Denormalize product info into po_line_items so POs still work if products are deleted later
+try { sqliteDb.exec(`ALTER TABLE po_line_items ADD COLUMN product_title TEXT;`); } catch (_) {}
+try { sqliteDb.exec(`ALTER TABLE po_line_items ADD COLUMN product_sku TEXT;`); } catch (_) {}
 
 // ─── Async Promise Wrapper ───────────────────────────────────────────────
 // Converts synchronous better-sqlite3 calls to async promises
@@ -115,6 +118,9 @@ function toSqlite(sql, params) {
     }
     return `$${n}`; // leave as-is if out of range (shouldn't happen)
   });
+  // If no $N references matched, return original params unchanged
+  // (handles queries that use ? placeholders directly)
+  if (converted === sql) return { sql, params };
   return { sql: converted, params: expanded };
 }
 

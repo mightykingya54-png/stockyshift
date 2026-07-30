@@ -462,7 +462,9 @@
         const headers = { 'Content-Type': 'application/json' };
         if (token) headers['Authorization'] = `Bearer ${token}`;
         if (opts.headers) Object.assign(headers, opts.headers);
-        return fetch(path, { headers, ...opts, headers });
+        // Destructure opts to prevent headers collision (opts.headers merged above)
+        const { headers: _ignored, ...optsWithoutHeaders } = opts;
+        return fetch(path, { headers, ...optsWithoutHeaders });
       };
 
       let res = await doFetch();

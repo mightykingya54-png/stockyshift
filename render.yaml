@@ -43,6 +43,11 @@ services:
         sync: false
       - key: FROM_EMAIL
         value: stockyshift@stockyshift.com
+      # Contact email addresses (set up forwarding at your domain registrar)
+      - key: CONTACT_PRIVACY
+        value: privacy@stockyshift.com
+      - key: CONTACT_LEGAL
+        value: legal@stockyshift.com
       # Billing: set to "false" for real charges. Use "true" while in development.
       - key: BILLING_TEST_MODE
         value: "true"
