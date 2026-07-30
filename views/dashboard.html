@@ -481,7 +481,7 @@
       }
       if (!res.ok) {
         let detail = `HTTP ${res.status}`;
-        try { const body = await res.json(); detail = String(body.error || body.message || detail); } catch (_) {}
+        try { const body = await res.json(); detail = String(body.detail || body.error || body.message || detail); } catch (_) {}
         throw new Error(detail);
       }
       return res.json();
