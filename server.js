@@ -497,7 +497,11 @@ app.get('/api/products', async (req, res) => {
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const products = await db.all(`
-    SELECT * FROM products WHERE shop = $1 AND is_active = 1 ORDER BY title
+    SELECT p.*, v.name as vendor_name
+    FROM products p
+    LEFT JOIN vendors v ON p.preferred_vendor_id = v.id
+    WHERE p.shop = $1 AND p.is_active = 1
+    ORDER BY p.title
   `, [shop]);
 
   res.json(products);
@@ -826,6 +830,25 @@ app.get('/api/purchase-orders/:id', async (req, res) => {
   `, [id]);
 
   res.json({ ...po, line_items: lineItems });
+});
+
+// Delete a purchase order (only draft POs can be deleted)
+app.delete('/api/purchase-orders/:id', async (req, res) => {
+  const { id } = req.params;
+  const { shop } = req.body;
+  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+
+  const po = await db.get('SELECT status FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
+  if (!po) return res.status(404).json({ error: 'PO not found' });
+  if (po.status !== 'draft') return res.status(400).json({ error: 'Only draft POs can be deleted' });
+
+  await db.transaction(async (tx) => {
+    await tx.run('DELETE FROM po_line_items WHERE po_id = $1', [id]);
+    await tx.run('DELETE FROM purchase_orders WHERE id = $1', [id]);
+  });
+
+  res.json({ success: true });
 });
 
 // ─── Test Email (dev only) ────────────────────────────────────────────────

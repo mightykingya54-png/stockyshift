@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>StockyShift</title>
 <style>
   *{box-sizing:border-box}
@@ -24,8 +25,12 @@
 <body>
 <div class="card" id="standalone">
   <h1>StockyShift</h1>
-  <p>Purchase orders &amp; low stock alerts for Shopify. The simple Stocky alternative.</p>
+  <p>Purchase orders &amp; low stock alerts for your Shopify store.</p>
+  <p style="font-size:13px;color:#888;margin:-16px 0 20px 0">
+    <strong>$29/month</strong> — 7-day free trial, no credit card needed
+  </p>
   <input type="text" id="shopInput" placeholder="your-store.myshopify.com" autofocus onkeydown="if(event.key==='Enter')install()">
+  <div id="inputError" class="error-msg" style="display:none;margin-bottom:12px"></div>
   <button onclick="install()">Install on your store</button>
   <p class="hint">Enter your Shopify store name above</p>
   <p style="margin-top:24px;font-size:12px;color:#bbb">
@@ -39,7 +44,7 @@
   <p id="embedMsg">Loading your dashboard...</p>
   <div class="spinner" id="embedSpinner"></div>
   <div id="embedError" class="error-msg" style="display:none">
-    Could not connect to your store. Please try reinstalling StockyShift from the Shopify App Store.
+    Could not connect to your store. Please install StockyShift from your Shopify Apps page.
   </div>
 </div>
 <script>
@@ -86,10 +91,44 @@
     document.getElementById('embedError').style.display = 'block';
   }
 
+  // ── Input validation helpers ──
+  const shopInput = document.getElementById('shopInput');
+  const inputError = document.getElementById('inputError');
+
+  function showError(msg) {
+    inputError.textContent = msg;
+    inputError.style.display = 'block';
+    shopInput.style.borderColor = '#dc2626';
+  }
+  function clearError() {
+    inputError.style.display = 'none';
+    shopInput.style.borderColor = '';
+  }
+
+  shopInput.addEventListener('blur', function() {
+    const s = this.value.trim();
+    if (s && !s.endsWith('.myshopify.com') && !/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(s)) {
+      showError('Enter a valid store name (e.g. my-store.myshopify.com)');
+    } else {
+      clearError();
+    }
+  });
+  shopInput.addEventListener('input', function() {
+    if (this.style.borderColor) clearError();
+  });
+
   // ── Install function for standalone mode ──
   window.install = function(){
-    const s = document.getElementById('shopInput').value.trim();
-    if (!s) return alert('Enter your store name');
+    const btn = document.querySelector('#standalone button');
+    const s = shopInput.value.trim();
+    if (!s) {
+      showError('Enter your store name');
+      shopInput.focus();
+      return;
+    }
+    clearError();
+    btn.disabled = true;
+    btn.textContent = 'Redirecting to Shopify...';
     window.location.href = '/auth?shop=' + encodeURIComponent(
       s.endsWith('.myshopify.com') ? s : s + '.myshopify.com'
     );

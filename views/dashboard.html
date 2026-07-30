@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>StockyShift — Purchase Orders & Stock Alerts</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -730,7 +731,8 @@
 
             let actions = `<button class="btn btn-outline btn-sm" onclick="viewPO(${po.id})" style="margin-right:4px">View</button>`;
             if (po.status === 'draft') {
-              actions += `<button class="btn btn-primary btn-sm" onclick="sendPO(${po.id})">Send</button>`;
+              actions += `<button class="btn btn-primary btn-sm" onclick="sendPO(${po.id})" style="margin-right:4px">Send</button>`;
+              actions += `<button class="btn btn-sm" style="background:#fee2e2;color:#dc2626;border:none" onclick="deletePO(${po.id})">Delete</button>`;
             } else if (po.status === 'sent' || po.status === 'partial') {
               actions += `<button class="btn btn-success btn-sm" onclick="showReceivePO(${po.id})">Receive</button>`;
             }
@@ -795,7 +797,7 @@
         <textarea id="poNotes" rows="2"></textarea>
         <div class="btn-row">
           <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-          <button class="btn btn-success" onclick="savePO(${p.id})">Create & Send</button>
+          <button class="btn btn-success" onclick="savePO(${p.id})">Create Draft PO</button>
         </div>
       `;
       document.getElementById('modalOverlay').classList.add('show');
@@ -968,6 +970,20 @@
         showToast('Failed to send: ' + e.message, 'error');
       } finally {
         sendingPOs.delete(id);
+      }
+    }
+
+    async function deletePO(id) {
+      if (!confirm('Delete this draft purchase order? This cannot be undone.')) return;
+      try {
+        await api(`/api/purchase-orders/${id}`, {
+          method: 'DELETE',
+          body: JSON.stringify({ shop }),
+        });
+        loadOrders();
+        showToast('Purchase order deleted', 'success');
+      } catch (e) {
+        showToast('Failed to delete: ' + e.message, 'error');
       }
     }
 
