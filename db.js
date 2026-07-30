@@ -79,6 +79,12 @@ sqliteDb.exec(`
     FOREIGN KEY (product_id) REFERENCES products(id)
   );
 
+  CREATE TABLE IF NOT EXISTS oauth_states (
+    state TEXT PRIMARY KEY,
+    shop TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_products_shop ON products(shop);
   CREATE INDEX IF NOT EXISTS idx_products_reorder ON products(shop, reorder_point, current_stock);
   CREATE INDEX IF NOT EXISTS idx_po_shop ON purchase_orders(shop, status);
@@ -139,9 +145,8 @@ const db = {
     try {
       const { sql: s, params: p } = toSqlite(sql, params);
       const stmt = sqliteDb.prepare(s);
-      if (p && p.length > 0) stmt.run(...p);
-      else stmt.run();
-      return Promise.resolve({ changes: sqliteDb.changes });
+      const info = (p && p.length > 0) ? stmt.run(...p) : stmt.run();
+      return Promise.resolve({ changes: info.changes, lastInsertRowid: info.lastInsertRowid });
     } catch (e) {
       return Promise.reject(e);
     }
@@ -172,9 +177,8 @@ const db = {
         run: (sql, params) => {
           const { sql: s, params: p } = toSqlite(sql, params);
           const stmt = sqliteDb.prepare(s);
-          if (p && p.length > 0) stmt.run(...p);
-          else stmt.run();
-          return { changes: sqliteDb.changes };
+          const info = (p && p.length > 0) ? stmt.run(...p) : stmt.run();
+          return { changes: info.changes, lastInsertRowid: info.lastInsertRowid };
         },
       };
       const result = await fn(tx);

@@ -265,7 +265,7 @@
       <span class="shop-name" id="shopName"></span>
     </div>
     <div>
-      <button class="btn btn-primary btn-sm" id="syncBtn" onclick="syncProducts()" style="display:none">⟳ Sync Products</button>
+      <button class="btn btn-primary btn-sm" id="syncBtn" onclick="syncProducts()">⟳ Sync Products</button>
     </div>
   </div>
 
@@ -275,6 +275,10 @@
       <button class="tab" data-tab="products">📦 Products</button>
       <button class="tab" data-tab="vendors">🏢 Vendors</button>
       <button class="tab" data-tab="orders">📄 Purchase Orders</button>
+    </div>
+
+    <div class="loading" id="initialLoading" style="text-align:center;padding:60px 20px;color:#888;font-size:15px;">
+      Loading your dashboard...
     </div>
 
     <div class="stats-row" id="statsRow"></div>
@@ -317,8 +321,9 @@
 
     // ─── Shopify App Bridge (embedded mode) ────────────────────────
     const isEmbedded = window.top !== window.self;
-    let __appBridgeToken = null;
+    let __appBridgeApp = null;
     let __appBridgeReady = null;
+    let __tokenCache = { token: null, exp: 0 };
 
     if (isEmbedded) {
       __appBridgeReady = (async () => {
@@ -328,12 +333,30 @@
           const host = urlParams.get('host');
           if (!host) return;
           const { createApp } = await import('https://unpkg.com/@shopify/app-bridge@3.7.11');
-          const app = createApp({ apiKey: config.api_key, host });
-          __appBridgeToken = await app.idToken();
+          __appBridgeApp = createApp({ apiKey: config.api_key, host });
+          // Prime the token cache
+          __tokenCache.token = await __appBridgeApp.idToken();
+          __tokenCache.exp = Date.now() + 45 * 60 * 1000; // refresh before ~60min expiry
         } catch (e) {
           console.warn('App Bridge init failed (non-fatal):', e);
         }
       })();
+    }
+
+    // Get a fresh session token, refreshing if expired or expiring soon
+    async function getSessionToken() {
+      if (!__appBridgeApp) return null;
+      // Refresh if token is missing or within 5 min of expiring
+      if (!__tokenCache.token || __tokenCache.exp - Date.now() < 5 * 60 * 1000) {
+        try {
+          __tokenCache.token = await __appBridgeApp.idToken();
+          __tokenCache.exp = Date.now() + 45 * 60 * 1000;
+        } catch (e) {
+          console.warn('Token refresh failed:', e);
+          return __tokenCache.token; // fall back to stale token, let 401 handler retry
+        }
+      }
+      return __tokenCache.token;
     }
 
     // ─── Billing check (runs before anything else) ──────────────────
@@ -415,6 +438,7 @@
     });
 
     function loadTab(name) {
+      setLoading('tab-' + name, 'Loading...');
       if (name === 'low-stock') loadLowStock();
       if (name === 'products') loadProducts();
       if (name === 'vendors') loadVendors();
@@ -430,23 +454,25 @@
     // ─── API helper ─────────────────────────────────────────────────
 
     async function api(path, opts = {}) {
-      // Wait for App Bridge token if embedded (non-blocking in standalone)
+      // Wait for App Bridge init if embedded (non-blocking in standalone)
       if (__appBridgeReady) await __appBridgeReady;
 
-      // Merge headers — session token takes priority when embedded
-      const headers = { 'Content-Type': 'application/json' };
-      if (__appBridgeToken) {
-        headers['Authorization'] = `Bearer ${__appBridgeToken}`;
-      }
-      // Merge caller-supplied headers on top
-      if (opts.headers) Object.assign(headers, opts.headers);
+      const doFetch = async () => {
+        const token = await getSessionToken();
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        if (opts.headers) Object.assign(headers, opts.headers);
+        return fetch(path, { headers, ...opts, headers });
+      };
 
-      const res = await fetch(path, {
-        headers,
-        ...opts,
-        // Don't let opts overwrite headers — already merged above
-        headers, // force our merged headers
-      });
+      let res = await doFetch();
+
+      // If the token was rejected (expired/invalid), force-refresh once and retry
+      if (res.status === 401 && __appBridgeApp) {
+        __tokenCache.exp = 0; // invalidate
+        res = await doFetch();
+      }
+
       if (res.status === 401) {
         if (shop) {
           window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
@@ -494,7 +520,12 @@
       try {
         const lowStock = await api(`/api/low-stock?shop=${shop}`);
         const products = await api(`/api/products?shop=${shop}`);
-        document.getElementById('statsRow').innerHTML = `
+
+        // Hide the initial loading indicator once we have data
+        const loading = document.getElementById('initialLoading');
+        if (loading) loading.style.display = 'none';
+        const products = await api(`/api/products?shop=${shop}`);
+        let statsHtml = `
           <div class="stat-card">
             <div class="number">${lowStock.length}</div>
             <div class="label">Products below reorder point</div>
@@ -508,8 +539,14 @@
             <div class="label">Products with reorder point set</div>
           </div>
         `;
+        document.getElementById('statsRow').innerHTML = statsHtml;
+        // Hide the initial loading indicator now that we have content
+        const loading = document.getElementById('initialLoading');
+        if (loading) loading.style.display = 'none';
       } catch (e) {
         document.getElementById('statsRow').innerHTML = `<div class="error">Failed to load stats</div>`;
+        const loading = document.getElementById('initialLoading');
+        if (loading) loading.style.display = 'none';
       }
     }
 
@@ -561,9 +598,7 @@
         const data = await api(`/api/products?shop=${shop}`);
         const vendors = await api(`/api/vendors?shop=${shop}`);
 
-        const syncBtn = document.getElementById('syncBtn');
         if (data.length === 0) {
-          if (syncBtn) syncBtn.style.display = '';
           document.getElementById('tab-products').innerHTML = `
             <div class="card">
               <h2>No products yet</h2>
@@ -573,7 +608,6 @@
           `;
           return;
         }
-        if (syncBtn) syncBtn.style.display = 'none';
 
         let html = `<div class="card"><h2>📦 ${data.length} Products</h2><table>
           <tr><th>Product</th><th>SKU</th><th>Stock</th><th>Reorder Point</th><th>Vendor</th><th></th></tr>`;

@@ -111,15 +111,24 @@ function verifySessionToken(token) {
   return { shop: match[1], payload };
 }
 
-// Middleware: authenticate via session token (Bearer) or fall back to session/params
+// Middleware: authenticate via session token (Bearer) or session cookie, then
+// BIND every API request to the authenticated shop. getShop() only accepts a
+// ?shop=/body param when no authenticated shop exists AND the route is one of
+// the explicit public allowlist. This closes the IDOR where any request could
+// pass ?shop=victim.myshopify.com.
+const PUBLIC_SHOP_PATHS = new Set(['/api/billing/status', '/api/config']);
 app.use((req, res, next) => {
+  let authedShop = null;
   const authHeader = req.headers['authorization'] || '';
   if (authHeader.startsWith('Bearer ')) {
     const result = verifySessionToken(authHeader.slice(7));
-    if (result) {
-      req.shop = result.shop;
-    }
+    if (result) authedShop = result.shop;
   }
+  if (!authedShop && req.session?.shop) authedShop = req.session.shop;
+  if (!authedShop && PUBLIC_SHOP_PATHS.has(req.path)) {
+    authedShop = req.query.shop || req.body?.shop || null;
+  }
+  req.shop = authedShop;
   next();
 });
 
@@ -147,6 +156,9 @@ const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 app.get('/auth', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop parameter');
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*\.myshopify\.com$/.test(shop)) {
+    return res.status(400).send('Invalid shop domain. Must be a valid .myshopify.com domain.');
+  }
 
   // Escape shop for safe HTML rendering
   const escShop = String(shop)
@@ -213,10 +225,11 @@ app.get('/auth', async (req, res) => {
     `);
   }
 
-  // Stateless state: HMAC-based, no session storage needed
-  const state = crypto.createHmac('sha256', SHOPIFY_API_SECRET)
-    .update(shop)
-    .digest('hex');
+  // Random, single-use state (real CSRF protection). Store + only valid once.
+  const state = crypto.randomBytes(20).toString('hex');
+  await db.run('DELETE FROM oauth_states WHERE created_at < $1', [Date.now() - 15 * 60 * 1000]);
+  await db.run('INSERT INTO oauth_states (state, shop, created_at) VALUES ($1, $2, $3)',
+    [state, shop, Date.now()]);
 
   const redirectUri = `${APP_URL}/auth/callback`;
   const installUrl = `https://${shop}/admin/oauth/authorize?` +
@@ -232,12 +245,12 @@ app.get('/auth', async (req, res) => {
 app.get('/auth/callback', async (req, res) => {
   const { shop, code, state } = req.query;
 
-  // Stateless state verification (HMAC-based, no session dependency)
-  const expectedState = crypto.createHmac('sha256', SHOPIFY_API_SECRET)
-    .update(shop)
-    .digest('hex');
-  if (state !== expectedState) {
-    return res.status(403).send('State mismatch. Possible CSRF attack.');
+  // Verify single-use state and consume it (prevents replay)
+  const stateRow = await db.get('SELECT shop, created_at FROM oauth_states WHERE state = $1', [state]);
+  await db.run('DELETE FROM oauth_states WHERE state = $1', [state || '']);
+  const stateAge = stateRow ? Date.now() - stateRow.created_at : Infinity;
+  if (!stateRow || stateRow.shop !== shop || stateAge > 15 * 60 * 1000) {
+    return res.status(403).send('State mismatch. Possible CSRF attack or expired link — try installing again.');
   }
 
   // Verify shop domain (must end in .myshopify.com)
@@ -420,14 +433,10 @@ app.get('/apps/stockyshift', async (req, res, next) => {
 
 // ─── API Routes ──────────────────────────────────────────────────────────
 
-// Helper: resolve shop from session token (embedded) → session cookie (standalone) → request param
+// Helper: resolve the authenticated shop for this request, or null.
 function getShop(req) {
-  // req.shop is set by the Bearer token middleware (embedded mode with App Bridge)
-  if (req.shop) return req.shop;
-  // Fall back to session (standalone mode with cookie)
-  if (req.session?.shop) return req.session.shop;
-  // Fall back to request body/query
-  return req.body?.shop || req.query?.shop || null;
+  const shop = req.shop || req.session?.shop || null;
+  return shop || null;
 }
 
 // Helper: load merchant's access token with auto-refresh for expiring tokens (API 2026-07+)
@@ -571,8 +580,9 @@ app.post('/api/sync-products', async (req, res) => {
       after = data.pageInfo.endCursor;
     }
 
-    // Upsert into local DB
+    // Upsert into local DB (single transaction for the whole sync)
     let variantCount = 0;
+    const seenVariantIds = [];
     await db.transaction(async (tx) => {
       for (const v of allVariants) {
         await tx.run(`
@@ -582,9 +592,25 @@ app.post('/api/sync-products', async (req, res) => {
             title = excluded.title,
             sku = excluded.sku,
             current_stock = excluded.current_stock,
-            inventory_item_id = excluded.inventory_item_id
+            inventory_item_id = excluded.inventory_item_id,
+            is_active = 1
         `, [v.product_id, v.variant_id, v.inventory_item_id, shop, v.title, v.sku, v.current_stock]);
+        seenVariantIds.push(v.variant_id);
         variantCount++;
+      }
+
+      // Deactivate variants that no longer exist in Shopify (deleted products/variants)
+      if (seenVariantIds.length > 0) {
+        const CHUNK = 500;
+        for (let i = 0; i < seenVariantIds.length; i += CHUNK) {
+          const chunk = seenVariantIds.slice(i, i + CHUNK);
+          const placeholders = chunk.map(() => '?').join(',');
+          const sql = `UPDATE products SET is_active = 0 WHERE shop = ? AND is_active = 1 AND shopify_variant_id NOT IN (${placeholders})`;
+          tx.run(sql, [shop, ...chunk]);
+        }
+      } else {
+        // Shopify returned zero variants — deactivate everything for this shop
+        tx.run('UPDATE products SET is_active = 0 WHERE shop = $1', [shop]);
       }
     });
 
@@ -878,9 +904,14 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     `, [status, id]);
   });
 
-  // After transaction: push inventory adjustments to Shopify AND always update local stock
+  // After transaction: push inventory adjustments to Shopify, and only update
+  // local stock for items whose push actually succeeded. If a push fails, the
+  // local stock is left unchanged so the next sync / retry keeps the data
+  // consistent (previously we bumped local stock even on Shopify failure,
+  // which desynced stock and silently stopped low-stock alerts from firing).
   if (adjustments.length > 0) {
-    let shopifySuccess = false;
+    let locationId = null;
+    let shopifyReachable = true;
     try {
       const token = await getToken(shop);
       // Get first location via GraphQL (most merchants have only one)
@@ -889,7 +920,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
         { query: `{ locations(first: 1) { edges { node { id } } } }` },
         { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
       );
-      const locationId = locRes.data?.data?.locations?.edges?.[0]?.node?.id;
+      locationId = locRes.data?.data?.locations?.edges?.[0]?.node?.id || null;
 
       if (locationId) {
         for (const adj of adjustments) {
@@ -900,42 +931,54 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
               }
             }
           `;
-          await axios.post(
-            `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-            {
-              query: mutation,
-              variables: {
-                input: {
-                  reason: "unknown",
-                  changes: [{
-                    inventoryItemId: idToGid('InventoryItem', adj.inventory_item_id),
-                    locationId: locationId,
-                    delta: adj.delta,
-                  }],
+          try {
+            const adjRes = await axios.post(
+              `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+              {
+                query: mutation,
+                variables: {
+                  input: {
+                    reason: "received",
+                    referenceDocumentUri: `stockyshift://purchase-order/${id}`,
+                    changes: [{
+                      inventoryItemId: idToGid('InventoryItem', adj.inventory_item_id),
+                      locationId: locationId,
+                      delta: adj.delta,
+                    }],
+                  },
                 },
               },
-            },
-            {
-              headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
-              timeout: 10000,
+              {
+                headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+                timeout: 10000,
+              }
+            );
+            const userErrors = adjRes.data?.data?.inventoryAdjustQuantities?.userErrors || [];
+            if (userErrors.length > 0) {
+              throw new Error(userErrors.map(e => e.message).join('; '));
             }
-          );
+            // Only mark local stock after Shopify accepted the adjustment
+            await db.run('UPDATE products SET current_stock = current_stock + $1 WHERE id = $2 AND shop = $3',
+              [adj.delta, adj.product_id, shop]);
+          } catch (itemErr) {
+            shopifyReachable = false;
+            console.error(`[Receive] Failed to push inventory for item ${adj.inventory_item_id} (${shop}):`, itemErr.message);
+          }
         }
-        shopifySuccess = true;
-        console.log(`[Receive] Shopify inventory updated for ${shop}: ${adjustments.length} items adjusted at location ${locRes.data?.data?.locations?.edges?.[0]?.node?.id}`);
+        console.log(`[Receive] Shopify inventory updated for ${shop} at location ${locationId}`);
       } else {
+        shopifyReachable = false;
         console.warn(`[Receive] No locations found for ${shop} — Shopify inventory not updated`);
       }
     } catch (err) {
+      shopifyReachable = false;
       console.error(`[Receive] Shopify inventory update failed for ${shop}:`, err.response?.data || err.message);
     }
 
-    // Always update local stock, regardless of Shopify push success
-    for (const adj of adjustments) {
-      await db.run('UPDATE products SET current_stock = current_stock + $1 WHERE id = $2 AND shop = $3',
-        [adj.delta, adj.product_id, shop]);
+    if (!shopifyReachable) {
+      console.warn(`[Receive] One or more inventory adjustments were NOT pushed to Shopify for ${shop}. ` +
+        `Local stock was only applied to successfully-synced items.`);
     }
-    console.log(`[Receive] Local stock updated for ${shop}: ${adjustments.length} items adjusted`);
   }
 
   res.json({ success: true, adjustments: adjustments.length });
@@ -1197,8 +1240,9 @@ app.get('/billing/confirm', async (req, res) => {
   const { charge_id, shop, subscription_id } = req.query;
   if (!shop) return res.status(400).send('Missing shop');
 
-  // Merchant declined billing — redirect back to dashboard with declined flag
+  // Merchant declined billing — mark it explicitly and redirect with the flag
   if (!charge_id && !subscription_id) {
+    await db.run(`UPDATE merchants SET billing_status = 'declined' WHERE shop = $1`, [shop]);
     return res.redirect(`/?shop=${shop}&billing=declined`);
   }
 
@@ -1353,7 +1397,15 @@ app.get('/api/db-health', async (req, res) => {
 cron.schedule('0 8 * * *', async () => {
   console.log('[Cron] Running daily low stock check...');
   try {
-    const merchants = await db.all('SELECT shop FROM merchants WHERE is_active = 1');
+    // Only alert paying/trial-active merchants — skip expired, cancelled, declined
+    const merchants = await db.all(`
+      SELECT shop, billing_status, trial_ends_at FROM merchants
+      WHERE is_active = 1
+        AND (
+          billing_status = 'active'
+          OR (billing_status = 'trial' AND trial_ends_at IS NOT NULL AND datetime(trial_ends_at) > datetime('now'))
+        )
+    `);
 
     for (const merchant of merchants) {
       const lowStock = await db.all(`

@@ -106,9 +106,19 @@
     shopInput.style.borderColor = '';
   }
 
+  function normalizeShop(s) {
+    // Strip .myshopify.com if included, validate the name part
+    return s.replace(/\.myshopify\.com$/i, '').trim();
+  }
+
+  function isValidShopName(s) {
+    return /^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(s);
+  }
+
   shopInput.addEventListener('blur', function() {
     const s = this.value.trim();
-    if (s && !s.endsWith('.myshopify.com') && !/^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(s)) {
+    const name = normalizeShop(s);
+    if (s && !isValidShopName(name)) {
       showError('Enter a valid store name (e.g. my-store.myshopify.com)');
     } else {
       clearError();
@@ -121,18 +131,24 @@
   // ── Install function for standalone mode ──
   window.install = function(){
     const btn = document.querySelector('#standalone button');
-    const s = shopInput.value.trim();
-    if (!s) {
+    const raw = shopInput.value.trim();
+    const name = normalizeShop(raw);
+    if (!name) {
       showError('Enter your store name');
       shopInput.focus();
+      return;
+    }
+    if (!isValidShopName(name)) {
+      showError('Invalid store name. Use letters, numbers, and hyphens only.');
       return;
     }
     clearError();
     btn.disabled = true;
     btn.textContent = 'Redirecting to Shopify...';
-    window.location.href = '/auth?shop=' + encodeURIComponent(
-      s.endsWith('.myshopify.com') ? s : s + '.myshopify.com'
-    );
+    // Use setTimeout to let the button text paint before navigation
+    setTimeout(() => {
+      window.location.href = '/auth?shop=' + encodeURIComponent(name + '.myshopify.com');
+    }, 100);
   };
 })();
 </script>
