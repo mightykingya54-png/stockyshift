@@ -522,10 +522,10 @@
         const products = await api(`/api/products?shop=${shop}`);
 
         // Hide the initial loading indicator once we have data
-        const loading = document.getElementById('initialLoading');
+        let loading = document.getElementById('initialLoading');
         if (loading) loading.style.display = 'none';
-        const products = await api(`/api/products?shop=${shop}`);
-        let statsHtml = `
+
+        const statsHtml = `
           <div class="stat-card">
             <div class="number">${lowStock.length}</div>
             <div class="label">Products below reorder point</div>
@@ -540,9 +540,6 @@
           </div>
         `;
         document.getElementById('statsRow').innerHTML = statsHtml;
-        // Hide the initial loading indicator now that we have content
-        const loading = document.getElementById('initialLoading');
-        if (loading) loading.style.display = 'none';
       } catch (e) {
         document.getElementById('statsRow').innerHTML = `<div class="error">Failed to load stats</div>`;
         const loading = document.getElementById('initialLoading');
