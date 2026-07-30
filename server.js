@@ -1479,6 +1479,44 @@ app.post('/webhooks/app/uninstalled', async (req, res) => {
   res.status(200).send('OK');
 });
 
+// ─── GDPR Webhooks (required for App Store review) ──────────────────────
+// We store zero customer PII (no email, name, address for customers), so
+// data_request and customers/redact are no-ops. shop/redact deletes everything.
+
+app.post('/webhooks/gdpr/customers/data_request', (req, res) => {
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+  if (!verifyWebhook(req.rawBody, hmac)) return res.status(401).send('Invalid HMAC');
+  // No customer data stored — nothing to return
+  console.log(`[GDPR] customers/data_request received (no-op)`);
+  res.status(200).send('OK');
+});
+
+app.post('/webhooks/gdpr/customers/redact', (req, res) => {
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+  if (!verifyWebhook(req.rawBody, hmac)) return res.status(401).send('Invalid HMAC');
+  // No customer data stored — nothing to redact
+  console.log(`[GDPR] customers/redact received (no-op)`);
+  res.status(200).send('OK');
+});
+
+app.post('/webhooks/gdpr/shop/redact', async (req, res) => {
+  const shop = req.headers['x-shopify-shop-domain'];
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+  if (!shop) return res.status(400).send('Missing shop');
+  if (!verifyWebhook(req.rawBody, hmac)) {
+    console.warn(`[GDPR] Invalid HMAC for shop/redact from ${shop}`);
+    return res.status(401).send('Invalid HMAC');
+  }
+  // Delete all data for this shop (same as uninstall but complete delete, not just deactivate)
+  await db.run('DELETE FROM po_line_items WHERE po_id IN (SELECT id FROM purchase_orders WHERE shop = $1)', [shop]);
+  await db.run('DELETE FROM purchase_orders WHERE shop = $1', [shop]);
+  await db.run('DELETE FROM products WHERE shop = $1', [shop]);
+  await db.run('DELETE FROM vendors WHERE shop = $1', [shop]);
+  await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+  console.log(`[GDPR] shop/redact — all data deleted for ${shop}`);
+  res.status(200).send('OK');
+});
+
 // ─── Start ───────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
