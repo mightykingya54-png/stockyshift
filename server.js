@@ -116,7 +116,7 @@ function verifySessionToken(token) {
 // ?shop=/body param when no authenticated shop exists AND the route is one of
 // the explicit public allowlist. This closes the IDOR where any request could
 // pass ?shop=victim.myshopify.com.
-const PUBLIC_SHOP_PATHS = new Set(['/api/billing/status', '/api/config']);
+const PUBLIC_SHOP_PATHS = new Set(['/api/billing/status', '/api/config', '/api/billing/create']);
 app.use((req, res, next) => {
   let authedShop = null;
   const authHeader = req.headers['authorization'] || '';
