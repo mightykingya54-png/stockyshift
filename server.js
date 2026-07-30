@@ -336,8 +336,8 @@ app.get('/', async (req, res, next) => {
   try {
     let { shop, reauth } = req.query;
     if (!shop) {
-      // Check session if shop was stored during OAuth (supports embedded iframe reloads)
-      if (req.session?.shop) {
+      // Only check session if visitor has a session cookie (avoids ~500ms DB read for every landing page visitor)
+      if (req.headers.cookie?.includes('connect.sid') && req.session?.shop) {
         return res.redirect(`/?shop=${encodeURIComponent(req.session.shop)}`);
       }
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
@@ -383,8 +383,8 @@ app.get('/apps/stockyshift', async (req, res, next) => {
     // Extract shop from Shopify's signed proxy request
     let { shop } = req.query;
     if (!shop) {
-      // Check session if shop was stored during OAuth (supports embedded iframe reloads)
-      if (req.session?.shop) {
+      // Only check session if visitor has a session cookie (avoids ~500ms DB read for every landing page visitor)
+      if (req.headers.cookie?.includes('connect.sid') && req.session?.shop) {
         return res.redirect(`/?shop=${encodeURIComponent(req.session.shop)}`);
       }
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
