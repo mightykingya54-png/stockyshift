@@ -454,7 +454,12 @@ const SYNC_PRODUCTS_QUERY = `
                   id
                   inventoryLevels(first: 10) {
                     edges {
-                      node { available }
+                      node {
+                        quantities(names: ["available"]) {
+                          name
+                          quantity
+                        }
+                      }
                     }
                   }
                 }
@@ -513,7 +518,8 @@ app.post('/api/sync-products', async (req, res) => {
           let available = 0;
           if (variant.inventoryItem?.inventoryLevels?.edges) {
             for (const level of variant.inventoryItem.inventoryLevels.edges) {
-              available += level.node.available;
+              const qty = level.node.quantities?.find(q => q.name === 'available');
+              available += qty ? qty.quantity : 0;
             }
           }
           allVariants.push({
