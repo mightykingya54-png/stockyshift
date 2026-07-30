@@ -511,7 +511,7 @@ app.post('/api/sync-products', async (req, res) => {
       const gqlRes = await axios.post(
         `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
         { query: SYNC_PRODUCTS_QUERY, variables: { first: 80, after } },
-        { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+        { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 30000 }
       );
 
       const data = gqlRes.data?.data?.products;
@@ -725,8 +725,8 @@ app.post('/api/purchase-orders', async (req, res) => {
   const vendorCheck = await db.get('SELECT id FROM vendors WHERE id = $1 AND shop = $2', [vendor_id, shop]);
   if (!vendorCheck) return res.status(400).json({ error: 'Vendor not found' });
 
-  // Generate PO number
-  const poNumber = `PO-${Date.now().toString(36).toUpperCase()}`;
+  // Generate PO number with random suffix to prevent collision on rapid double-click
+  const poNumber = `PO-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
   let total = 0;
 
   // Calculate total
@@ -1482,6 +1482,38 @@ app.post('/webhooks/app/uninstalled', async (req, res) => {
 // ─── GDPR Webhooks (required for App Store review) ──────────────────────
 // We store zero customer PII (no email, name, address for customers), so
 // data_request and customers/redact are no-ops. shop/redact deletes everything.
+
+// Unified GDPR endpoint — receives all compliance topics,
+// dispatches based on X-Shopify-Topic header
+app.post('/webhooks/gdpr', async (req, res) => {
+  const topic = req.headers['x-shopify-topic'];
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+  const shop = req.headers['x-shopify-shop-domain'];
+  if (!verifyWebhook(req.rawBody, hmac)) return res.status(401).send('Invalid HMAC');
+
+  switch (topic) {
+    case 'customers/data_request':
+      console.log(`[GDPR] customers/data_request received (no-op)`);
+      return res.status(200).send('OK');
+    case 'customers/redact':
+      console.log(`[GDPR] customers/redact received (no-op)`);
+      return res.status(200).send('OK');
+    case 'shop/redact':
+      if (!shop) return res.status(400).send('Missing shop');
+      await db.run('DELETE FROM po_line_items WHERE po_id IN (SELECT id FROM purchase_orders WHERE shop = $1)', [shop]);
+      await db.run('DELETE FROM purchase_orders WHERE shop = $1', [shop]);
+      await db.run('DELETE FROM products WHERE shop = $1', [shop]);
+      await db.run('DELETE FROM vendors WHERE shop = $1', [shop]);
+      await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+      console.log(`[GDPR] shop/redact — all data deleted for ${shop}`);
+      return res.status(200).send('OK');
+    default:
+      console.warn(`[GDPR] Unknown topic: ${topic}`);
+      return res.status(200).send('OK');
+  }
+});
+
+// Per-endpoint GDPR routes (kept for backward compatibility)
 
 app.post('/webhooks/gdpr/customers/data_request', (req, res) => {
   const hmac = req.headers['x-shopify-hmac-sha256'];

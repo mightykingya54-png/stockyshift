@@ -101,6 +101,8 @@ try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN expires_at TEXT;`); } catc
 // Denormalize product info into po_line_items so POs still work if products are deleted later
 try { sqliteDb.exec(`ALTER TABLE po_line_items ADD COLUMN product_title TEXT;`); } catch (_) {}
 try { sqliteDb.exec(`ALTER TABLE po_line_items ADD COLUMN product_sku TEXT;`); } catch (_) {}
+// Unique PO numbers per shop (prevents collision on rapid double-click)
+try { sqliteDb.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_po_number_shop ON purchase_orders(po_number, shop);`); } catch (_) {}
 
 // ─── Async Promise Wrapper ───────────────────────────────────────────────
 // Converts synchronous better-sqlite3 calls to async promises

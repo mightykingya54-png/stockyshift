@@ -662,14 +662,21 @@
     async function saveProduct(id) {
       const reorder_point = parseInt(document.getElementById('reorderPoint').value) || 0;
       const preferred_vendor_id = document.getElementById('preferredVendor').value || null;
-      await api('/api/products/reorder-point', {
-        method: 'POST',
-        body: JSON.stringify({ id, reorder_point, preferred_vendor_id: preferred_vendor_id ? parseInt(preferred_vendor_id) : null, shop }),
-      });
-      closeModal();
-      loadProducts();
-      loadLowStock();
-      loadStats();
+      const btn = document.querySelector('#modalContent .btn-primary');
+      if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+      try {
+        await api('/api/products/reorder-point', {
+          method: 'POST',
+          body: JSON.stringify({ id, reorder_point, preferred_vendor_id: preferred_vendor_id ? parseInt(preferred_vendor_id) : null, shop }),
+        });
+        closeModal();
+        loadProducts();
+        loadLowStock();
+        loadStats();
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+        showToast('Failed to save: ' + e.message, 'error');
+      }
     }
 
     // ─── Vendors ────────────────────────────────────────────────────
@@ -735,13 +742,20 @@
       const email = document.getElementById('vendorEmail').value;
       const min_order_amount = parseFloat(document.getElementById('vendorMin').value) || 0;
       if (!name || !email) return showToast('Name and email are required', 'error');
-      await api('/api/vendors', {
-        method: 'POST',
-        body: JSON.stringify({ shop, name, email, min_order_amount }),
-      });
-      closeModal();
-      loadVendors();
-      showToast('Vendor created!', 'success');
+      const btn = document.querySelector('#modalContent .btn-primary');
+      if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+      try {
+        await api('/api/vendors', {
+          method: 'POST',
+          body: JSON.stringify({ shop, name, email, min_order_amount }),
+        });
+        closeModal();
+        loadVendors();
+        showToast('Vendor created!', 'success');
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+        showToast(e.message, 'error');
+      }
     }
 
     async function showEditVendor(id) {
@@ -773,13 +787,20 @@
       const email = document.getElementById('editVendorEmail').value;
       const min_order_amount = parseFloat(document.getElementById('editVendorMin').value) || 0;
       if (!name || !email) return showToast('Name and email are required', 'error');
-      await api(`/api/vendors/${id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ shop, name, email, min_order_amount }),
-      });
-      closeModal();
-      loadVendors();
-      showToast('Vendor updated!', 'success');
+      const btn = document.querySelector('#modalContent .btn-primary');
+      if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+      try {
+        await api(`/api/vendors/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ shop, name, email, min_order_amount }),
+        });
+        closeModal();
+        loadVendors();
+        showToast('Vendor updated!', 'success');
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+        showToast(e.message, 'error');
+      }
     }
 
     async function deleteVendor(id) {
@@ -822,7 +843,7 @@
 
             let actions = `<button class="btn btn-outline btn-sm" onclick="viewPO(${po.id})" style="margin-right:4px">View</button>`;
             if (po.status === 'draft') {
-              actions += `<button class="btn btn-primary btn-sm" onclick="sendPO(${po.id})" style="margin-right:4px">Send</button>`;
+              actions += `<button class="btn btn-primary btn-sm" onclick="sendPO(${po.id}, this)" style="margin-right:4px">Send</button>`;
               actions += `<button class="btn btn-sm" style="background:#fee2e2;color:#dc2626;border:none" onclick="deletePO(${po.id})">Delete</button>`;
             } else if (po.status === 'sent' || po.status === 'partial') {
               actions += `<button class="btn btn-success btn-sm" onclick="showReceivePO(${po.id})">Receive</button>`;
@@ -903,19 +924,26 @@
       if (!vendor_id) return showToast('Please select a vendor', 'error');
       if (!ordered_qty || ordered_qty < 1) return showToast('Please enter a valid quantity', 'error');
 
-      await api('/api/purchase-orders', {
-        method: 'POST',
-        body: JSON.stringify({
-          shop,
-          vendor_id,
-          items: [{ product_id: productId, ordered_qty, unit_cost }],
-          notes,
-        }),
-      });
+      const btn = document.querySelector('#modalContent .btn-success');
+      if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
+      try {
+        await api('/api/purchase-orders', {
+          method: 'POST',
+          body: JSON.stringify({
+            shop,
+            vendor_id,
+            items: [{ product_id: productId, ordered_qty, unit_cost }],
+            notes,
+          }),
+        });
 
-      closeModal();
-      loadOrders();
-      showToast('Purchase order created! You can send it from the Orders tab.', 'success');
+        closeModal();
+        loadOrders();
+        showToast('Purchase order created! You can send it from the Orders tab.', 'success');
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Create Draft PO'; }
+        showToast(e.message, 'error');
+      }
     }
 
     // ─── Multi-Product PO ───────────────────────────────────────────
@@ -993,15 +1021,22 @@
 
       if (items.length === 0) return showToast('Enter quantity for at least one product.', 'error');
 
-      await api('/api/purchase-orders', {
-        method: 'POST',
-        body: JSON.stringify({ shop, vendor_id, items, notes }),
-      });
+      const btn = document.querySelector('#modalContent .btn-success');
+      if (btn) { btn.disabled = true; btn.textContent = 'Creating...'; }
+      try {
+        await api('/api/purchase-orders', {
+          method: 'POST',
+          body: JSON.stringify({ shop, vendor_id, items, notes }),
+        });
 
-      closeModal();
-      loadOrders();
-      loadStats();
-      showToast(`Purchase order created with ${items.length} item(s)!`, 'success');
+        closeModal();
+        loadOrders();
+        loadStats();
+        showToast(`Purchase order created with ${items.length} item(s)!`, 'success');
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Create Purchase Order'; }
+        showToast('Failed to create PO: ' + e.message, 'error');
+      }
     }
 
     // ─── PO Actions (View / Send / Receive) ─────────────────────────
@@ -1046,10 +1081,11 @@
     }
 
     const sendingPOs = new Set();
-    async function sendPO(id) {
+    async function sendPO(id, btn) {
       if (sendingPOs.has(id)) return; // already sending
       if (!(await showConfirm('Send this purchase order to the vendor via email?', 'Send'))) return;
       sendingPOs.add(id);
+      if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
       try {
         await api(`/api/purchase-orders/${id}/send`, {
           method: 'POST',
@@ -1058,6 +1094,7 @@
         loadOrders();
         showToast('Purchase order sent!', 'success');
       } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Send'; }
         showToast('Failed to send: ' + e.message, 'error');
       } finally {
         sendingPOs.delete(id);
@@ -1134,6 +1171,8 @@
 
       if (items.length === 0) return showToast('Enter quantity for at least one item.', 'error');
 
+      const btn = document.querySelector('#modalContent .btn-success');
+      if (btn) { btn.disabled = true; btn.textContent = 'Recording...'; }
       try {
         await api(`/api/purchase-orders/${id}/receive`, {
           method: 'POST',
@@ -1143,6 +1182,7 @@
         loadOrders();
         showToast('Receipt recorded! Inventory updated.', 'success');
       } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Confirm Receipt'; }
         showToast('Failed to record receipt: ' + e.message, 'error');
       }
     }

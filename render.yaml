@@ -50,4 +50,4 @@ services:
         value: legal@stockyshift.com
       # Billing: set to "false" for real charges. Use "true" while in development.
       - key: BILLING_TEST_MODE
-        value: "true"
+        value: "false"
