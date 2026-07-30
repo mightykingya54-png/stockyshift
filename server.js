@@ -125,6 +125,8 @@ app.use((req, res, next) => {
     if (result) authedShop = result.shop;
   }
   if (!authedShop && req.session?.shop) authedShop = req.session.shop;
+  // Legacy: allow specific public routes to accept shop from body/query
+  // even without any session. These routes are audited to be safe.
   if (!authedShop && PUBLIC_SHOP_PATHS.has(req.path)) {
     authedShop = req.query.shop || req.body?.shop || null;
   }
@@ -314,6 +316,10 @@ app.get('/', async (req, res, next) => {
       return res.redirect(`/auth?shop=${shop}`);
     }
 
+    // Refresh session shop so subsequent API calls (which use getShop()) don't fail
+    // when the session cookie expired or was lost (e.g. after session DB migration).
+    req.session.shop = shop;
+
     // If SKIP_BILLING is true, force billing status to active
     if (process.env.SKIP_BILLING === 'true') {
       await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
@@ -361,6 +367,9 @@ app.get('/apps/stockyshift', async (req, res, next) => {
       await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
+
+    // Refresh session shop so API calls (via getShop()) work even if session was stale
+    req.session.shop = shop;
 
     // Authenticated — serve the dashboard directly through the iframe
     res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
