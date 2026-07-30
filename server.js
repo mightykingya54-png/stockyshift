@@ -576,8 +576,8 @@ app.post('/api/sync-products', async (req, res) => {
   } catch (err) {
     const detail = err.response?.data || err.message;
     const raw = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
-    console.error('Sync error:', raw);
-    res.status(500).json({ error: 'Sync failed', detail: raw.substring(0, 500) });
+    console.error('Sync error:', raw, err.stack);
+    res.status(500).json({ error: 'Sync failed', detail: raw.substring(0, 500), stack: err.stack?.substring(0, 300) });
   }
 });
 
