@@ -649,7 +649,7 @@
         <label>Preferred Vendor</label>
         <select id="preferredVendor">
           <option value="">None</option>
-          ${vendors.map(v => `<option value="${v.id}" ${v.id === p.preferred_vendor_id ? 'selected' : ''}>${v.name}</option>`).join('')}
+          ${vendors.map(v => `<option value="${v.id}" ${v.id === p.preferred_vendor_id ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}
         </select>
         <div class="btn-row">
           <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -899,7 +899,7 @@
         <label>Vendor</label>
         <select id="poVendorId">
           <option value="">— Select a vendor —</option>
-          ${vendors.map(v => `<option value="${v.id}" ${v.id === p.preferred_vendor_id ? 'selected' : ''}>${v.name}</option>`).join('')}
+          ${vendors.map(v => `<option value="${v.id}" ${v.id === p.preferred_vendor_id ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}
         </select>
         <label>Quantity to order</label>
         <input type="number" id="poQty" value="${Math.max(p.reorder_point - p.current_stock, 1)}" min="1">
@@ -975,7 +975,7 @@
         <h2>Create Purchase Order</h2>
         <label>Vendor</label>
         <select id="poMultiVendor">
-          ${vendors.map(v => `<option value="${v.id}">${v.name}</option>`).join('')}
+          ${vendors.map(v => `<option value="${v.id}">${esc(v.name)}</option>`).join('')}
         </select>
         <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 4px">
           <label style="margin:0;font-size:14px">Items to order</label>

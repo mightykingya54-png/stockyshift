@@ -94,14 +94,17 @@ function verifySessionToken(token) {
   // Must be issued for our API key
   if (payload.aud !== SHOPIFY_API_KEY) return null;
 
-  // Verify HMAC signature
+  // Verify HMAC signature with timing-safe comparison
   const expectedSig = crypto
     .createHmac('sha256', SHOPIFY_API_SECRET)
     .update(parts[0] + '.' + parts[1])
     .digest('base64url')
     .replace(/=+$/, ''); // base64url has no padding
 
-  if (parts[2] !== expectedSig) return null;
+  const sigBuf = Buffer.from(expectedSig);
+  const partsBuf = Buffer.from(parts[2]);
+  if (sigBuf.length !== partsBuf.length) return null;
+  if (!crypto.timingSafeEqual(sigBuf, partsBuf)) return null;
 
   // Extract shop from dest field: "https://{shop}.myshopify.com"
   const dest = payload.dest || '';
@@ -514,8 +517,11 @@ app.post('/api/sync-products', async (req, res) => {
     const allVariants = [];
     let hasNextPage = true;
     let after = null;
+    let pageCount = 0;
+    const MAX_PAGES = 50; // 80 per page × 50 = 4,000 variants max per sync
 
-    while (hasNextPage) {
+    while (hasNextPage && pageCount < MAX_PAGES) {
+      pageCount++;
       const gqlRes = await axios.post(
         `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
         { query: SYNC_PRODUCTS_QUERY, variables: { first: 80, after } },
@@ -737,9 +743,19 @@ app.post('/api/purchase-orders', async (req, res) => {
   const poNumber = `PO-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
   let total = 0;
 
-  // Calculate total
+  // Calculate total with input validation
   for (const item of items) {
-    total += item.ordered_qty * (item.unit_cost || 0);
+    const qty = parseInt(item.ordered_qty);
+    const cost = parseFloat(item.unit_cost) || 0;
+    if (!Number.isFinite(qty) || qty < 1) {
+      return res.status(400).json({ error: 'ordered_qty must be a positive number' });
+    }
+    if (cost < 0) {
+      return res.status(400).json({ error: 'unit_cost cannot be negative' });
+    }
+    total += qty * cost;
+    item.ordered_qty = qty;
+    item.unit_cost = cost;
   }
 
   const poId = await db.transaction(async (tx) => {
@@ -1308,7 +1324,8 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
         const cancelResult = await axios.post(
           `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
           {
-            query: `mutation { appSubscriptionCancel(id: "${dbChargeId}") { userErrors { field message } } }`,
+            query: `mutation appSubscriptionCancel($id: ID!) { appSubscriptionCancel(id: $id) { userErrors { field message } } }`,
+            variables: { id: dbChargeId },
           },
           { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
         );
@@ -1343,7 +1360,8 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
             const cancelResult = await axios.post(
               `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
               {
-                query: `mutation { appSubscriptionCancel(id: "${id}") { userErrors { field message } } }`,
+                query: `mutation appSubscriptionCancel($subId: ID!) { appSubscriptionCancel(id: $subId) { userErrors { field message } } }`,
+                variables: { subId: id },
               },
               { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
             );
