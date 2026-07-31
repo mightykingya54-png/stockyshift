@@ -60,7 +60,10 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
   store: SessionStore,
-  secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+  secret: process.env.SESSION_SECRET || (() => {
+    console.error('FATAL: SESSION_SECRET not set — refusing to start. Set SESSION_SECRET in .env');
+    process.exit(1);
+  })(),
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -248,8 +251,8 @@ app.get('/auth/callback', async (req, res) => {
     return res.status(403).send('State mismatch. Possible CSRF attack or expired link — try installing again.');
   }
 
-  // Verify shop domain (must end in .myshopify.com)
-  if (!shop?.endsWith('.myshopify.com')) {
+  // Verify shop domain (same validation as /auth endpoint)
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*\.myshopify\.com$/.test(shop)) {
     return res.status(400).send('Invalid shop domain');
   }
 
@@ -381,8 +384,8 @@ app.get('/', async (req, res, next) => {
     // when the session cookie expired or was lost (e.g. after session DB migration).
     req.session.shop = shop;
 
-    // If SKIP_BILLING is true, force billing status to active
-    if (process.env.SKIP_BILLING === 'true') {
+    // If SKIP_BILLING is true, force billing status to active (DEV ONLY — never in production)
+    if (process.env.NODE_ENV !== 'production' && process.env.SKIP_BILLING === 'true') {
       await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
     }
 
@@ -412,8 +415,8 @@ app.get('/apps/stockyshift', async (req, res, next) => {
     // Check if merchant is authenticated
     const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
 
-    // If SKIP_BILLING is true, force billing status to active
-    if (process.env.SKIP_BILLING === 'true' && merchant) {
+    // If SKIP_BILLING is true, force billing status to active (DEV ONLY)
+    if (process.env.NODE_ENV !== 'production' && process.env.SKIP_BILLING === 'true' && merchant) {
       await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
     }
 
@@ -1231,7 +1234,7 @@ const BILLING_PLAN = {
 
 // Check if billing is active (or in trial) for a shop
 function isBillingActive(merchant) {
-  if (process.env.SKIP_BILLING === 'true') return true;
+  if (process.env.NODE_ENV !== 'production' && process.env.SKIP_BILLING === 'true') return true;
   if (!merchant) return false;
   if (merchant.billing_status === 'active') return true;
   if (merchant.billing_status === 'trial') {
@@ -1398,10 +1401,12 @@ app.get('/billing/confirm', async (req, res) => {
   const { charge_id, shop, subscription_id } = req.query;
   if (!shop) return res.status(400).send('Missing shop parameter — this URL should only be accessed via Shopify billing redirect');
 
-  // Merchant declined billing — mark it explicitly and redirect with the flag
+  // Merchant declined billing — mark it explicitly and redirect back into the
+  // admin with the declined flag (dashboard shows the message on the overlay)
   if (!charge_id && !subscription_id) {
     await db.run(`UPDATE merchants SET billing_status = 'declined' WHERE shop = $1`, [shop]);
-    return res.redirect(`/?shop=${encodeURIComponent(shop)}&billing=declined`);
+    const storeSlug = shop.replace(/\.myshopify\.com$/i, '');
+    return res.redirect(`https://admin.shopify.com/store/${storeSlug}/apps/stockyshift?billing=declined`);
   }
 
   const token = await getToken(shop);
@@ -1456,8 +1461,11 @@ app.get('/billing/confirm', async (req, res) => {
 
     console.log(`[Billing] ${shop} subscribed — ${billingStatus} until ${trialEnd.toISOString()}`);
 
-    // Redirect to dashboard
-    res.redirect(`/?shop=${shop}`);
+    // Redirect back into the Shopify admin where the app is embedded.
+    // (Landing on the bare app URL would drop the merchant out of the admin
+    // chrome — the embedded route is admin.shopify.com/store/<slug>/apps/stockyshift.)
+    const storeSlug = shop.replace(/\.myshopify\.com$/i, '');
+    res.redirect(`https://admin.shopify.com/store/${storeSlug}/apps/stockyshift`);
   } catch (err) {
     console.error('[Billing] Confirm error:', err.message);
     res.status(500).send('Failed to activate billing. Please try again.');

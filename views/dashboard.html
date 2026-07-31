@@ -411,7 +411,9 @@
           method: 'POST',
           body: JSON.stringify({ shop }),
         });
-        window.location.href = result.confirmation_url;
+        // Redirect the TOP window, not the iframe — Shopify's billing page
+        // refuses to render inside the app iframe ("refused to connect").
+        window.top.location.href = result.confirmation_url;
       } catch (e) {
         btn.disabled = false;
         btn.textContent = 'Start 7-Day Free Trial';
@@ -623,7 +625,7 @@
               <td>${esc(p.sku || '-')}</td>
               <td>${badge}</td>
             <td>${p.reorder_point > 0 ? p.reorder_point : '-'}</td>
-            <td>${p.vendor_name || '-'}</td>
+            <td>${esc(p.vendor_name || '-')}</td>
             <td><button class="btn btn-outline btn-sm" onclick="editProduct(${p.id})">Edit</button></td>
           </tr>`;
         }
