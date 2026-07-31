@@ -1468,14 +1468,11 @@ app.post('/webhooks/app/uninstalled', async (req, res) => {
     return res.status(401).send('Invalid HMAC');
   }
 
-  // Delete merchant data for privacy compliance (GDPR / App Store review)
-  await db.run('DELETE FROM po_line_items WHERE po_id IN (SELECT id FROM purchase_orders WHERE shop = $1)', [shop]);
-  await db.run('DELETE FROM purchase_orders WHERE shop = $1', [shop]);
-  await db.run('DELETE FROM products WHERE shop = $1', [shop]);
-  await db.run('DELETE FROM vendors WHERE shop = $1', [shop]);
+  // Mark shop inactive but KEEP data — if merchant reinstalls within 48 hours,
+  // their vendors, POs, and settings are restored. shop/redact (48h later) deletes everything.
   await db.run('UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = $1', [shop]);
 
-  console.log(`[Webhook] ${shop} uninstalled StockyShift — data cleaned up`);
+  console.log(`[Webhook] ${shop} uninstalled StockyShift — marked inactive, data preserved (48h grace)`);
   res.status(200).send('OK');
 });
 
