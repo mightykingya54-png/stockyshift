@@ -204,6 +204,7 @@
     }
     .toast-success { background: #059669; color: white; }
     .toast-error { background: #dc2626; color: white; }
+    .toast-warning { background: #d97706; color: white; }
     .toast-info { background: #2563eb; color: white; }
     @keyframes toastIn {
       from { opacity: 0; transform: translateX(20px); }
@@ -1226,7 +1227,18 @@
         loadProducts();
         loadLowStock();
         loadStats();
-        showToast(`Synced ${result.synced} product variants!`, 'success');
+        if (result.partial) {
+          // Sync hit MAX_PAGES — the merchant's catalog is larger than what
+          // we can fetch in one sync. Be explicit or they'll assume the full
+          // catalog is loaded (reorder points set on half their SKUs, low
+          // stock alerts never firing for the rest).
+          showToast(
+            `Synced ${result.synced} variants — your catalog exceeds the 4,000-variant sync limit, so some products were NOT synced.`,
+            'warning'
+          );
+        } else {
+          showToast(`Synced ${result.synced} product variants!`, 'success');
+        }
       } catch (e) {
         showToast('Sync failed: ' + e.message, 'error');
       } finally {

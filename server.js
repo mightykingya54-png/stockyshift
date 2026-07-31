@@ -579,6 +579,9 @@ const SYNC_PRODUCTS_QUERY = `
                 sku
                 inventoryItem {
                   id
+                  unitCost {
+                    amount
+                  }
                   # NOTE: Limited to first 10 locations. Merchants with 11+ locations
                   # will get incomplete inventory counts. Future fix: paginate all locations.
                   inventoryLevels(first: 10) {
@@ -663,6 +666,12 @@ app.post('/api/sync-products', async (req, res) => {
             title: product.title,
             sku: variant.sku || '',
             current_stock: available,
+            // Shopify's unitCost (in the shop's base currency). Null when the
+            // merchant doesn't track costs in Shopify — leave 0 so the PO
+            // modal falls back to a blank field instead of a wrong number.
+            unit_cost: variant.inventoryItem?.unitCost?.amount
+              ? parseFloat(variant.inventoryItem.unitCost.amount)
+              : 0,
           });
         }
       }
@@ -678,15 +687,16 @@ app.post('/api/sync-products', async (req, res) => {
     await db.transaction(async (tx) => {
       for (const v of allVariants) {
         await tx.run(`
-          INSERT INTO products (shopify_product_id, shopify_variant_id, inventory_item_id, shop, title, sku, current_stock)
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          INSERT INTO products (shopify_product_id, shopify_variant_id, inventory_item_id, shop, title, sku, current_stock, unit_cost)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
           ON CONFLICT(shop, shopify_variant_id) DO UPDATE SET
             title = excluded.title,
             sku = excluded.sku,
             current_stock = excluded.current_stock,
             inventory_item_id = excluded.inventory_item_id,
+            unit_cost = excluded.unit_cost,
             is_active = 1
-        `, [v.product_id, v.variant_id, v.inventory_item_id, shop, v.title, v.sku, v.current_stock]);
+        `, [v.product_id, v.variant_id, v.inventory_item_id, shop, v.title, v.sku, v.current_stock, v.unit_cost || 0]);
         seenVariantIds.push(v.variant_id);
         variantCount++;
       }
@@ -708,7 +718,10 @@ app.post('/api/sync-products', async (req, res) => {
       }
     });
 
-    res.json({ synced: variantCount });
+    // partial: true when MAX_PAGES was hit — the merchant only saw part of
+    // their catalog and must know, or they'll set reorder points on half
+    // their SKUs and miss low-stock alerts on the rest.
+    res.json({ synced: variantCount, partial: !syncCompleted });
   } catch (err) {
     const detail = err.response?.data || err.message;
     const raw = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
