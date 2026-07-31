@@ -19,6 +19,11 @@ const SessionStore = new SqliteStore({
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Behind Cloudflare → Render proxy. Without this, req.secure is false,
+// so express-session silently refuses to set secure:true cookies —
+// sessions never get created in production and all API auth fails.
+app.set('trust proxy', 1);
+
 // Shopify API version — update when Shopify deprecates the current version
 const API_VERSION = '2026-07';
 
@@ -99,8 +104,10 @@ function verifySessionToken(token) {
   if (header.alg !== 'HS256') return null;
   // Must not be expired
   if (payload.exp < Date.now() / 1000) return null;
-  // Must not be used before its nbf (not-before) timestamp, with 60s clock skew tolerance
-  if (payload.nbf && payload.nbf > (Date.now() / 1000) + 60) return null;
+  // Must not be used before its nbf (not-before) timestamp, with 5min clock skew
+  // tolerance — Shopify's token issuer clock can be ahead of this server's, and
+  // a strict nbf check then rejects perfectly valid tokens (=> "Session expired").
+  if (payload.nbf && payload.nbf > (Date.now() / 1000) + 300) return null;
   // Must be issued for our API key
   if (payload.aud !== SHOPIFY_API_KEY) return null;
 
