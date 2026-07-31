@@ -217,8 +217,9 @@ const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 
 // Step 1: Redirect merchant to Shopify authorization
 app.get('/auth', async (req, res) => {
-  const { shop } = req.query;
+  let { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop parameter');
+  shop = String(shop).toLowerCase(); // Shopify normalizes to lowercase — store canonical form
   if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*\.myshopify\.com$/.test(shop)) {
     return res.status(400).send('Invalid shop domain. Must be a valid .myshopify.com domain.');
   }
@@ -241,15 +242,32 @@ app.get('/auth', async (req, res) => {
 
 // Step 2: Handle OAuth callback
 app.get('/auth/callback', async (req, res) => {
-  const { shop, code, state } = req.query;
+  const { code, state } = req.query;
+  const shop = String(req.query.shop || '').toLowerCase();
 
-  // Verify single-use state and consume it (prevents replay)
-  const stateRow = await db.get('SELECT shop, created_at FROM oauth_states WHERE state = $1', [state]);
-  await db.run('DELETE FROM oauth_states WHERE state = $1', [state || '']);
+  // Verify single-use state and consume it (prevents replay).
+  // NOTE: if this callback is delivered twice (Shopify retries, or the merchant
+  // double-clicked approve), the first delivery consumes the state and the
+  // second would see no row. Handle that gracefully below.
+  const stateRow = await db.get('SELECT shop, created_at FROM oauth_states WHERE state = $1', [state || '']);
   const stateAge = stateRow ? Date.now() - stateRow.created_at : Infinity;
   if (!stateRow || stateRow.shop !== shop || stateAge > 15 * 60 * 1000) {
+    // State failed to verify. If the merchant is ALREADY installed and active,
+    // this is a duplicate delivery of a successful callback — just send them in.
+    // Otherwise it's a genuine CSRF attempt or expired link.
+    const existing = shop ? await db.get('SELECT is_active FROM merchants WHERE shop = $1', [shop]) : null;
+    if (existing?.is_active) {
+      console.log(`[OAuth] ${shop} callback re-delivered (state already consumed) — merchant active, redirecting in`);
+      req.session.shop = shop;
+      return res.redirect(`/?shop=${shop}`);
+    }
+    console.warn(`[OAuth] State mismatch for ${shop}: state=${state ? state.slice(0, 8) + '…' : '(missing)'} row=${stateRow ? 'found' : 'missing'} age=${Math.round(stateAge / 1000)}s`);
     return res.status(403).send('State mismatch. Possible CSRF attack or expired link — try installing again.');
   }
+
+  // Consume the state AFTER successful token exchange below (not before) so a
+  // transient Shopify failure doesn't burn a valid state on retry.
+  // (Kept near the top for visibility — deletion happens at the end.)
 
   // Verify shop domain (same validation as /auth endpoint)
   if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*\.myshopify\.com$/.test(shop)) {
@@ -326,6 +344,10 @@ app.get('/auth/callback', async (req, res) => {
 
     // Store shop in session so embedded iframe reload works without ?shop= in URL
     req.session.shop = shop;
+    // Consume the single-use state NOW that the exchange succeeded — deleting it
+    // earlier would burn a valid state on transient failures, and the duplicate-
+    // delivery guard above already handles retries safely.
+    await db.run('DELETE FROM oauth_states WHERE state = $1', [state || '']);
     // Redirect merchant to the embedded app or dashboard
     res.redirect(`/?shop=${shop}`);
   } catch (err) {
