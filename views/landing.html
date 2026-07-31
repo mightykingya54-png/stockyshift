@@ -71,6 +71,12 @@
   }
 
   if (isEmbedded && shop) {
+    // Cross-origin iframe: window.top access throws SecurityError in Safari.
+    // Wrap all top navigations so a blocked redirect can't break the page.
+    const goTop = (url) => {
+      try { window.top.location.href = url; }
+      catch (e) { window.open(url, '_blank'); }
+    };
     // Check if already authenticated via a lightweight ping
     fetch('/api/billing/status?shop=' + encodeURIComponent(shop), {
       signal: AbortSignal.timeout(5000)
@@ -80,13 +86,13 @@
         // so App Bridge can initialize in the dashboard
         const fullQuery = window.location.search;
         if (r.ok) {
-          window.top.location.href = '/' + fullQuery;
+          goTop('/' + fullQuery);
         } else {
-          window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+          goTop('/auth?shop=' + encodeURIComponent(shop));
         }
       })
       .catch(() => {
-        window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+        goTop('/auth?shop=' + encodeURIComponent(shop));
       });
   } else if (isEmbedded && !shop) {
     // Embedded but no shop found — show error instead of infinite spinner

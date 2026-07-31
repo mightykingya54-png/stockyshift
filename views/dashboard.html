@@ -322,6 +322,7 @@
     // ─── Shopify App Bridge (embedded mode) ────────────────────────
     const isEmbedded = window.top !== window.self;
     let __appBridgeApp = null;
+    let __getSessionToken = null;
     let __appBridgeReady = null;
     let __tokenCache = { token: null, exp: 0 };
 
@@ -332,10 +333,16 @@
           const config = await configRes.json();
           const host = urlParams.get('host');
           if (!host) return;
-          const { createApp } = await import('https://unpkg.com/@shopify/app-bridge@3.7.11');
+          // NOTE: must import the TRUE ESM builds. The package root served by
+          // unpkg is the UMD build (no ESM exports -> createApp undefined), and
+          // v3.7.11 has NO app.idToken() — that API came in v4. The v3 way is
+          // getSessionToken(app) from the utilities deep import.
+          const { createApp } = await import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/+esm');
+          const { getSessionToken } = await import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/utilities/session-token/+esm');
           __appBridgeApp = createApp({ apiKey: config.api_key, host });
+          __getSessionToken = getSessionToken;
           // Prime the token cache
-          __tokenCache.token = await __appBridgeApp.idToken();
+          __tokenCache.token = await getSessionToken(__appBridgeApp);
           __tokenCache.exp = Date.now() + 45 * 60 * 1000; // refresh before ~60min expiry
         } catch (e) {
           console.warn('App Bridge init failed (non-fatal):', e);
@@ -345,11 +352,11 @@
 
     // Get a fresh session token, refreshing if expired or expiring soon
     async function getSessionToken() {
-      if (!__appBridgeApp) return null;
+      if (!__appBridgeApp || !__getSessionToken) return null;
       // Refresh if token is missing or within 5 min of expiring
       if (!__tokenCache.token || __tokenCache.exp - Date.now() < 5 * 60 * 1000) {
         try {
-          __tokenCache.token = await __appBridgeApp.idToken();
+          __tokenCache.token = await __getSessionToken(__appBridgeApp);
           __tokenCache.exp = Date.now() + 45 * 60 * 1000;
         } catch (e) {
           console.warn('Token refresh failed:', e);
@@ -413,7 +420,12 @@
         });
         // Redirect the TOP window, not the iframe — Shopify's billing page
         // refuses to render inside the app iframe ("refused to connect").
-        window.top.location.href = result.confirmation_url;
+        // Guard against Safari's cross-origin SecurityError on window.top.
+        try {
+          window.top.location.href = result.confirmation_url;
+        } catch (e) {
+          window.open(result.confirmation_url, '_blank');
+        }
       } catch (e) {
         btn.disabled = false;
         btn.textContent = 'Start 7-Day Free Trial';
@@ -479,7 +491,15 @@
 
       if (res.status === 401) {
         if (shop) {
-          window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+          // Navigate the TOP window to re-auth. In a cross-origin embedded
+          // iframe, Safari throws SecurityError ("The operation is insecure")
+          // on window.top access — fall back to opening in a new tab so the
+          // user isn't left staring at a dead error.
+          try {
+            window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+          } catch (e) {
+            window.open('/auth?shop=' + encodeURIComponent(shop), '_blank');
+          }
         }
         throw new Error('Session expired');
       }
