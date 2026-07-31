@@ -132,6 +132,38 @@ app.use((req, res, next) => {
 // Serve static dashboard
 app.use(express.static('views'));
 
+// ─── Billing enforcement middleware ───────────────────────────────────────
+// Enforces paywall server-side — an expired/cancelled merchant cannot use
+// the API even if they bypass the client-side billing overlay.
+const BILLING_EXEMPT_PATHS = [
+  '/api/config',
+  '/api/billing/status',
+  '/api/billing/create',
+  '/api/db-health',
+  '/api/debug',
+];
+if (process.env.NODE_ENV !== 'production') BILLING_EXEMPT_PATHS.push('/api/test-email');
+
+app.use('/api', async (req, res, next) => {
+  // Allow preflight and exempt paths
+  if (req.method === 'OPTIONS') return next();
+  if (BILLING_EXEMPT_PATHS.some(p => req.path === p || req.path.startsWith(p + '/'))) return next();
+
+  const shop = req.shop || req.session?.shop;
+  if (!shop) return next(); // auth middleware handles 401 for these
+
+  try {
+    const merchant = await db.get('SELECT billing_status, trial_ends_at FROM merchants WHERE shop = $1', [shop]);
+    if (!isBillingActive(merchant)) {
+      return res.status(402).json({ error: 'Billing required', code: 'BILLING_REQUIRED' });
+    }
+    next();
+  } catch (e) {
+    console.error('[Billing] Enforcement check failed:', e.message);
+    next(); // fail open on DB error, auth still applies
+  }
+});
+
 // ─── Static Pages ─────────────────────────────────────────────────────────
 
 app.get('/privacy', (req, res) => {
@@ -433,6 +465,11 @@ async function refreshShopifyToken(shop, oldRefreshToken) {
   return access_token;
 }
 
+// Per-shop token refresh lock — prevents multiple concurrent requests from
+// each calling refresh_token (the first refresh invalidates the old token,
+// so the others would fail with an expired refresh_token).
+const refreshLocks = new Map();
+
 async function getToken(shop) {
   const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
   if (!merchant?.access_token) return null;
@@ -442,9 +479,16 @@ async function getToken(shop) {
     const expiresAt = new Date(merchant.expires_at).getTime();
     const fiveMinutesFromNow = Date.now() + 5 * 60 * 1000;
     if (expiresAt < fiveMinutesFromNow) {
+      // Serialize refresh per shop: if another request is already refreshing,
+      // await the same promise instead of firing a duplicate refresh.
+      if (!refreshLocks.has(shop)) {
+        refreshLocks.set(shop, (async () => {
+          console.log(`[Token] Refreshing token for ${shop} (expired or expiring soon)`);
+          return refreshShopifyToken(shop, merchant.refresh_token);
+        })().finally(() => refreshLocks.delete(shop)));
+      }
       try {
-        console.log(`[Token] Refreshing token for ${shop} (expired or expiring soon)`);
-        return await refreshShopifyToken(shop, merchant.refresh_token);
+        return await refreshLocks.get(shop);
       } catch (err) {
         console.error(`[Token] Refresh failed for ${shop}:`, err.response?.data || err.message);
         // Fall through — return the old token and let the API call fail naturally
@@ -566,6 +610,7 @@ app.post('/api/sync-products', async (req, res) => {
     // Upsert into local DB (single transaction for the whole sync)
     let variantCount = 0;
     const seenVariantIds = [];
+    const syncCompleted = !hasNextPage; // false if we hit MAX_PAGES (partial sync)
     await db.transaction(async (tx) => {
       for (const v of allVariants) {
         await tx.run(`
@@ -582,8 +627,10 @@ app.post('/api/sync-products', async (req, res) => {
         variantCount++;
       }
 
-      // Deactivate variants that no longer exist in Shopify (deleted products/variants)
-      if (seenVariantIds.length > 0) {
+      // Deactivate variants that no longer exist in Shopify (deleted products/variants).
+      // Only run when the sync completed fully — a partial sync (hit MAX_PAGES) means
+      // unseen variants may still exist, so deactivating them would be wrong.
+      if (syncCompleted && seenVariantIds.length > 0) {
         const CHUNK = 500;
         for (let i = 0; i < seenVariantIds.length; i += CHUNK) {
           const chunk = seenVariantIds.slice(i, i + CHUNK);
@@ -591,8 +638,8 @@ app.post('/api/sync-products', async (req, res) => {
           const sql = `UPDATE products SET is_active = 0 WHERE shop = ? AND is_active = 1 AND shopify_variant_id NOT IN (${placeholders})`;
           tx.run(sql, [shop, ...chunk]);
         }
-      } else {
-        // Shopify returned zero variants — deactivate everything for this shop
+      } else if (syncCompleted && seenVariantIds.length === 0) {
+        // Store genuinely has zero variants in Shopify — deactivate everything
         tx.run('UPDATE products SET is_active = 0 WHERE shop = $1', [shop]);
       }
     });
@@ -850,16 +897,16 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid PO ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
-  // Validate items shape and quantities
+  // Validate items shape and quantities (deltas, not absolute totals)
   if (!Array.isArray(items)) {
     return res.status(400).json({ error: 'items must be an array' });
   }
   for (const item of items) {
-    const qty = parseInt(item.received_qty);
-    if (!Number.isFinite(qty) || qty < 0) {
-      return res.status(400).json({ error: 'received_qty must be a non-negative integer' });
+    const delta = parseInt(item.received_delta ?? item.received_qty ?? 0);
+    if (!Number.isFinite(delta) || delta <= 0) {
+      return res.status(400).json({ error: 'received_delta must be a positive integer' });
     }
-    item.received_qty = qty;
+    item.received_delta = delta;
     const lineId = parseInt(item.line_item_id);
     if (!Number.isFinite(lineId) || lineId < 1) {
       return res.status(400).json({ error: 'line_item_id must be a positive integer' });
@@ -871,54 +918,49 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const po = await db.get('SELECT id FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
-  // Validate quantities: can't receive more than ordered, can't undo previous receives
-  for (const item of items) {
-    const lineItemCheck = await db.get('SELECT ordered_qty, received_qty FROM po_line_items WHERE id = $1 AND po_id = $2', [item.line_item_id, id]);
-    if (!lineItemCheck) return res.status(400).json({ error: `Line item ${item.line_item_id} not found on this PO` });
-    if (item.received_qty < (lineItemCheck.received_qty || 0)) {
-      return res.status(400).json({ error: `Cannot reduce received quantity for this item (already received: ${lineItemCheck.received_qty || 0})` });
-    }
-    if (item.received_qty > lineItemCheck.ordered_qty) {
-      return res.status(400).json({ error: `Cannot receive more than ${lineItemCheck.ordered_qty} for this item (ordered: ${lineItemCheck.ordered_qty}, already received: ${lineItemCheck.received_qty || 0})` });
-    }
-  }
-
-  // Snapshot old received_qty values so we can roll back if Shopify push fails
-  const oldValues = {};
-  for (const item of items) {
-    const row = await db.get('SELECT received_qty FROM po_line_items WHERE id = $1 AND po_id = $2', [item.line_item_id, id]);
-    oldValues[item.line_item_id] = row?.received_qty || 0;
-  }
+  // Verify all line items belong to this PO and compute new totals
+  // (validation happens again INSIDE the transaction — see below —
+  //  so a concurrent request can't slip past with stale data)
 
   // Collect inventory adjustments needed (computed during transaction below)
   const adjustments = [];
 
   await db.transaction(async (tx) => {
     for (const item of items) {
-      const oldQty = oldValues[item.line_item_id] || 0;
-      const delta = item.received_qty - oldQty;
+      // Atomic re-check INSIDE the transaction (better-sqlite3 is synchronous,
+      // so no other request can interleave here — closes the TOCTOU race)
+      const current = tx.get(`
+        SELECT ordered_qty, received_qty FROM po_line_items WHERE id = $1 AND po_id = $2
+      `, [item.line_item_id, id]);
+      if (!current) throw new Error(`Line item ${item.line_item_id} not found on this PO`);
+
+      const oldQty = current.received_qty || 0;
+      const delta = item.received_delta;
+      const newQty = oldQty + delta;
+
+      if (newQty > current.ordered_qty) {
+        throw new Error(`Cannot receive more than ${current.ordered_qty} for this item (ordered: ${current.ordered_qty}, already received: ${oldQty})`);
+      }
 
       await tx.run(`
         UPDATE po_line_items SET received_qty = $1 WHERE id = $2 AND po_id = $3
-      `, [item.received_qty, item.line_item_id, id]);
+      `, [newQty, item.line_item_id, id]);
 
-      // If adding inventory, record adjustment for Shopify push
-      if (delta > 0) {
-        const lineItem = tx.get(`
-          SELECT p.inventory_item_id, p.id AS product_id
-          FROM po_line_items pli
-          JOIN products p ON pli.product_id = p.id
-          WHERE pli.id = $1
-        `, [item.line_item_id]);
+      // Record adjustment for Shopify push (delta only)
+      const lineItem = tx.get(`
+        SELECT p.inventory_item_id, p.id AS product_id
+        FROM po_line_items pli
+        JOIN products p ON pli.product_id = p.id
+        WHERE pli.id = $1
+      `, [item.line_item_id]);
 
-        if (lineItem?.inventory_item_id) {
-          adjustments.push({
-            inventory_item_id: lineItem.inventory_item_id,
-            product_id: lineItem.product_id,
-            line_item_id: item.line_item_id,
-            delta,
-          });
-        }
+      if (lineItem?.inventory_item_id) {
+        adjustments.push({
+          inventory_item_id: lineItem.inventory_item_id,
+          product_id: lineItem.product_id,
+          line_item_id: item.line_item_id,
+          delta,
+        });
       }
     }
 
@@ -1018,11 +1060,12 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     // Roll back received_qty for any items whose Shopify push failed
     if (failedLineItemIds.size > 0) {
       for (const lineItemId of failedLineItemIds) {
-        const oldQty = oldValues[lineItemId] || 0;
+        // Subtract the delta (not a snapshot — current value is authoritative)
         await db.run(`
-          UPDATE po_line_items SET received_qty = $1 WHERE id = $2 AND po_id = $3
-        `, [oldQty, lineItemId, id]);
-        console.log(`[Receive] Rolled back received_qty for line item ${lineItemId} to ${oldQty} (Shopify push failed)`);
+          UPDATE po_line_items SET received_qty = MAX(received_qty - $1, 0)
+          WHERE id = $2 AND po_id = $3
+        `, [adjustments.find(a => a.line_item_id === lineItemId)?.delta || 0, lineItemId, id]);
+        console.log(`[Receive] Rolled back received_qty for line item ${lineItemId} (Shopify push failed)`);
       }
       console.warn(`[Receive] ${failedLineItemIds.size} item(s) rolled back. Total pushed: ${adjustments.length - failedLineItemIds.size} of ${adjustments.length}.`);
     }

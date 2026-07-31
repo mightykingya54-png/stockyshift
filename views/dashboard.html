@@ -1050,7 +1050,7 @@
       for (const item of po.line_items) {
         const lineTotal = item.ordered_qty * item.unit_cost;
         itemsHtml += `<tr>
-          <td><strong>${item.title}</strong><br><span style="color:#999;font-size:11px">${item.sku || '-'}</span></td>
+          <td><strong>${esc(item.title)}</strong><br><span style="color:#999;font-size:11px">${esc(item.sku || '-')}</span></td>
           <td>${item.ordered_qty}</td>
           <td>$${Number(item.unit_cost).toFixed(2)}</td>
           <td>$${lineTotal.toFixed(2)}</td>
@@ -1059,9 +1059,9 @@
       }
 
       modal.innerHTML = `
-        <h2>PO: ${po.po_number}</h2>
+        <h2>PO: ${esc(po.po_number)}</h2>
         <p style="color:#666;margin-bottom:12px">
-          Vendor: <strong>${po.vendor_name}</strong> &middot;
+          Vendor: <strong>${esc(po.vendor_name)}</strong> &middot;
           Status: ${po.status.toUpperCase()} &middot;
           Created: ${new Date(po.created_at).toLocaleDateString()}
           ${po.emailed_at ? `&middot; Sent: ${new Date(po.emailed_at).toLocaleDateString()}` : ''}
@@ -1125,14 +1125,14 @@
         const remaining = item.ordered_qty - (item.received_qty || 0);
         if (remaining <= 0) {
           itemsHtml += `<tr style="color:#999">
-            <td><strong>${item.title}</strong></td>
+            <td><strong>${esc(item.title)}</strong></td>
             <td>${item.ordered_qty}</td>
             <td>${item.received_qty || 0}</td>
             <td>✅ Received</td>
           </tr>`;
         } else {
           itemsHtml += `<tr>
-            <td><strong>${item.title}</strong><br><span style="color:#999;font-size:11px">Current stock: ${item.current_stock}</span></td>
+            <td><strong>${esc(item.title)}</strong><br><span style="color:#999;font-size:11px">Current stock: ${item.current_stock}</span></td>
             <td>${item.ordered_qty}</td>
             <td>${item.received_qty || 0}</td>
             <td><input type="number" id="recQty_${item.id}" value="${remaining}" min="0" max="${remaining}" style="width:70px"></td>
@@ -1141,8 +1141,8 @@
       }
 
       modal.innerHTML = `
-        <h2>Receive: ${po.po_number}</h2>
-        <p style="color:#666;margin-bottom:12px">Vendor: <strong>${po.vendor_name}</strong></p>
+        <h2>Receive: ${esc(po.po_number)}</h2>
+        <p style="color:#666;margin-bottom:12px">Vendor: <strong>${esc(po.vendor_name)}</strong></p>
         <p style="font-size:13px;color:#888;margin-bottom:8px">Enter quantities received. Inventory will be updated in Shopify.</p>
         <table>
           <tr><th>Product</th><th>Ordered</th><th>Received</th><th>Now Receiving</th></tr>
@@ -1162,9 +1162,11 @@
       for (const item of po.line_items) {
         const qtyInput = document.getElementById(`recQty_${item.id}`);
         if (qtyInput) {
-          const received_qty = parseInt(qtyInput.value) || 0;
-          if (received_qty > 0) {
-            items.push({ line_item_id: item.id, received_qty: (item.received_qty || 0) + received_qty });
+          // Send DELTA (what the user typed), not absolute total —
+          // the server computes the new total atomically inside a transaction.
+          const delta = parseInt(qtyInput.value) || 0;
+          if (delta > 0) {
+            items.push({ line_item_id: item.id, received_delta: delta });
           }
         }
       }
