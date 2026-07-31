@@ -19,6 +19,24 @@ const SessionStore = new SqliteStore({
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ─── Async error safety net (Express 4) ───────────────────────────────────
+// Express 4 does NOT catch rejected promises from async route handlers —
+// a DB error in a route without try/catch becomes an unhandledRejection,
+// which crashes the WHOLE process (every store, not just the failing one).
+// Shim every app.get/post/put/delete registration so each handler's
+// rejection is forwarded to the global error middleware at the bottom of
+// this file instead of killing the app. Sync handlers pass through unchanged.
+const _routeMethods = ['get', 'post', 'put', 'delete'];
+for (const _m of _routeMethods) {
+  const _orig = app[_m].bind(app);
+  app[_m] = (path, ...handlers) => {
+    const wrapped = handlers.map(h =>
+      h.length >= 4 ? h : (req, res, next) => Promise.resolve(h(req, res, next)).catch(next)
+    );
+    return _orig(path, ...wrapped);
+  };
+}
+
 // Behind Cloudflare → Render proxy. Without this, req.secure is false,
 // so express-session silently refuses to set secure:true cookies —
 // sessions never get created in production and all API auth fails.
@@ -1151,7 +1169,14 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
       if (totalReceived >= totalOrdered && totalOrdered > 0) newStatus = 'received';
       else if (totalReceived > 0) newStatus = 'partial';
 
-      await db.run(`UPDATE purchase_orders SET status = $1 WHERE id = $2`, [newStatus, id]);
+      // Clear received_at if the rollback drops the PO out of 'received' —
+      // otherwise the timestamp records a receipt that was rolled back.
+      await db.run(`
+        UPDATE purchase_orders
+        SET status = $1,
+            received_at = CASE WHEN $1 = 'received' THEN received_at ELSE NULL END
+        WHERE id = $2
+      `, [newStatus, id]);
       console.warn(`[Receive] PO ${id} status recomputed to '${newStatus}' after rollback`);
     }
   }
@@ -1352,6 +1377,40 @@ app.get('/api/billing/status', async (req, res) => {
   let trialDaysLeft = 0;
   if (merchant.trial_ends_at) {
     trialDaysLeft = Math.max(0, Math.ceil((new Date(merchant.trial_ends_at) - new Date()) / 86400000));
+  }
+
+  // Trial expired locally. With a Shopify-managed trial (trialDays in the
+  // charge), Shopify starts billing after the trial WITHOUT changing the
+  // subscription status — so no subscriptions_update webhook fires and the
+  // local 'trial' status would never flip to 'active', locking out a paying
+  // customer on day 8. Query Shopify live once and heal the local status.
+  if (merchant.billing_status === 'trial' && merchant.trial_ends_at && new Date(merchant.trial_ends_at) <= new Date()) {
+    try {
+      const token = await getToken(shop);
+      if (token) {
+        const verifyRes = await axios.post(
+          `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+          {
+            query: `
+              query {
+                currentAppInstallation {
+                  activeSubscriptions { id status }
+                }
+              }
+            `,
+          },
+          { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
+        );
+        const subs = verifyRes.data?.data?.currentAppInstallation?.activeSubscriptions || [];
+        if (subs.some(s => String(s.status).toUpperCase() === 'ACTIVE')) {
+          await db.run(`UPDATE merchants SET billing_status = 'active', trial_ends_at = NULL WHERE shop = $1`, [shop]);
+          merchant.billing_status = 'active';
+          console.log(`[Billing] ${shop} trial expired but Shopify subscription ACTIVE — healed to 'active'`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[Billing] Live status check failed for ${shop}: ${err.message} — keeping trial-expired status`);
+    }
   }
 
   res.json({
@@ -1844,6 +1903,36 @@ app.post('/webhooks/gdpr/shop/redact', async (req, res) => {
   await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
   console.log(`[GDPR] shop/redact — all data deleted for ${shop}`);
   res.status(200).send('OK');
+});
+
+// ─── Error handling (must be registered AFTER all routes) ────────────────
+
+// Global error handler — catches sync throws and next(err) from the route
+// shim above. Returns JSON (never HTML) so the embedded dashboard can show
+// a readable error instead of a blank iframe.
+app.use((err, req, res, next) => {
+  console.error('[Unhandled Error]', err.stack);
+  if (res.headersSent) return next(err);
+  res.status(500).json({
+    error: 'Internal server error',
+    detail: process.env.NODE_ENV === 'production' ? undefined : err.message,
+  });
+});
+
+// Clean 404s for unmatched routes
+app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+
+// Belt-and-suspenders: keep the process alive if a rejection escapes the
+// shim. A single failed request must never take down every store.
+process.on('unhandledRejection', (e) => {
+  console.error('[Unhandled Rejection]', e);
+});
+
+// Uncaught synchronous exceptions leave the process in an unknown state —
+// log and exit so Render restarts a clean instance.
+process.on('uncaughtException', (e) => {
+  console.error('[Uncaught Exception]', e);
+  process.exit(1);
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────
