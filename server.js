@@ -1406,16 +1406,21 @@ app.post('/api/billing/create', async (req, res) => {
   }
 });
 
-// Billing test confirm (simulated approval for BILLING_TEST_MODE — dev only)
+// Billing test confirm (simulated approval for BILLING_TEST_MODE)
 app.get('/billing/test-confirm', async (req, res) => {
-  // Defense in depth: never reachable in production even if BILLING_TEST_MODE leaks
-  if (process.env.NODE_ENV === 'production' || process.env.BILLING_TEST_MODE !== 'true') {
+  // Guarded ONLY by BILLING_TEST_MODE, not NODE_ENV: running BILLING_TEST_MODE=true
+  // in production is a legitimate pre-launch configuration (test charges), and
+  // this route does nothing dangerous — activation happens in /api/billing/create,
+  // which is already gated by the same flag. Blocking on NODE_ENV just made the
+  // test-mode flow 404 in prod ("Not found" after clicking the trial button).
+  if (process.env.BILLING_TEST_MODE !== 'true') {
     return res.status(404).send('Not found');
   }
   const { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop');
   // Already activated by /api/billing/create, just redirect to dashboard
-  res.redirect(`/?shop=${shop}`);
+  const storeSlug = String(shop).replace(/\.myshopify\.com$/i, '');
+  res.redirect(`https://admin.shopify.com/store/${storeSlug}/apps/stockyshift`);
 });
 
 // Callback from Shopify after merchant approves (or declines) billing
