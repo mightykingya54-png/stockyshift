@@ -1500,7 +1500,11 @@ app.get('/billing/test-confirm', async (req, res) => {
 
 // Callback from Shopify after merchant approves (or declines) billing
 app.get('/billing/confirm', async (req, res) => {
-  const { charge_id, shop, subscription_id } = req.query;
+  const { charge_id, subscription_id } = req.query;
+  // Shopify's GraphQL billing redirect includes shop, but never trust the
+  // query alone — fall back to the session cookie (same browser) so a
+  // missing query param can't silently kill the approval flow.
+  const shop = String(req.query.shop || req.session?.shop || '').toLowerCase();
   if (!shop) return res.status(400).send('Missing shop parameter — this URL should only be accessed via Shopify billing redirect');
 
   // Merchant declined billing — mark it explicitly and redirect back into the
