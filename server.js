@@ -37,6 +37,10 @@ for (const _m of _routeMethods) {
   };
 }
 
+// Strip control characters and cap length on merchant-entered text before it
+// reaches the DB — control chars can corrupt PDFKit rendering and HTML output.
+const sanitizeText = (s, max = 255) => String(s ?? '').replace(/[\x00-\x1F\x7F]/g, '').trim().slice(0, max);
+
 // Behind Cloudflare → Render proxy. Without this, req.secure is false,
 // so express-session silently refuses to set secure:true cookies —
 // sessions never get created in production and all API auth fails.
@@ -530,9 +534,20 @@ async function refreshShopifyToken(shop, oldRefreshToken) {
   const expires_at = expires_in
     ? new Date(Date.now() + expires_in * 1000).toISOString()
     : null;
-  await db.run(`
-    UPDATE merchants SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE shop = $4
-  `, [access_token, newRefreshToken, expires_at, shop]);
+  try {
+    await db.run(`
+      UPDATE merchants SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE shop = $4
+    `, [access_token, newRefreshToken, expires_at, shop]);
+  } catch (err) {
+    // Shopify ALREADY rotated the refresh token — if the persist fails we now
+    // hold a consumed token and the next refresh will 401. Retry once
+    // (idempotent UPDATE), then let the error surface loudly so it's noticed
+    // before the token becomes unusable.
+    console.error(`[Token] Persist new token for ${shop} failed: ${err.message} — retrying once`);
+    await db.run(`
+      UPDATE merchants SET access_token = $1, refresh_token = $2, expires_at = $3 WHERE shop = $4
+    `, [access_token, newRefreshToken, expires_at, shop]);
+  }
   return access_token;
 }
 
@@ -732,11 +747,29 @@ async function runProductSync(shop, token) {
 }
 
 // Sync products from Shopify (manual trigger)
+// In-memory per-shop throttle: max one sync per shop per minute. Repeated
+// bursts burn Shopify GraphQL API credits and can throttle the WHOLE app
+// (Shopify's rate limits apply app-wide, not per store).
+const syncThrottle = new Map();
 app.post('/api/sync-products', async (req, res) => {
   const shop = requireShop(req, res);
   if (!shop) return;
   const token = await getToken(shop);
   if (!token) return res.status(401).json({ error: 'Shop not installed' });
+
+  const now = Date.now();
+  const lastSync = syncThrottle.get(shop) || 0;
+  if (now - lastSync < 60000) {
+    const waitSec = Math.ceil((60000 - (now - lastSync)) / 1000);
+    return res.status(429).json({ error: `Please wait ${waitSec}s — syncs are limited to once per minute per store.` });
+  }
+  syncThrottle.set(shop, now);
+  // Sweep stale entries so the map can't grow unbounded
+  if (syncThrottle.size > 1000) {
+    for (const [s, t] of syncThrottle) {
+      if (now - t > 300000) syncThrottle.delete(s);
+    }
+  }
 
   try {
     const result = await runProductSync(shop, token);
@@ -834,7 +867,9 @@ app.get('/api/vendors', async (req, res) => {
 app.post('/api/vendors', async (req, res) => {
   const shop = requireShop(req, res);
   if (!shop) return;
-  const { name, email, min_order_amount, notes } = req.body;
+  const { email, min_order_amount } = req.body;
+  const name = sanitizeText(req.body.name, 100);
+  const notes = sanitizeText(req.body.notes, 255);
   if (!name || !email) return res.status(400).json({ error: 'Missing required fields' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
@@ -851,7 +886,9 @@ app.put('/api/vendors/:id', async (req, res) => {
   const { id } = req.params;
   const shop = requireShop(req, res);
   if (!shop) return;
-  const { name, email, min_order_amount, notes } = req.body;
+  const { email, min_order_amount } = req.body;
+  const name = sanitizeText(req.body.name, 100);
+  const notes = sanitizeText(req.body.notes, 255);
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid vendor ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
   if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
@@ -896,7 +933,8 @@ app.delete('/api/vendors/:id', async (req, res) => {
 app.post('/api/purchase-orders', async (req, res) => {
   const shop = requireShop(req, res);
   if (!shop) return;
-  const { vendor_id, items, notes } = req.body;
+  const { vendor_id, items } = req.body;
+  const notes = sanitizeText(req.body.notes, 500);
   if (!vendor_id || !items?.length) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
