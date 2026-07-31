@@ -34,8 +34,14 @@ app.use((req, res, next) => {
   // Only allow valid myshopify.com domains to prevent header injection
   if (shop && /^[a-zA-Z0-9][a-zA-Z0-9.-]*\.myshopify\.com$/.test(shop)) {
     res.setHeader('Content-Security-Policy', `frame-ancestors https://${shop} https://admin.shopify.com;`);
-  } else {
+  } else if (req.path.startsWith('/api/') || req.path.startsWith('/webhooks/') || req.path === '/privacy' || req.path === '/terms' || req.path === '/') {
+    // Public/non-embedded routes: deny framing entirely
     res.setHeader('X-Frame-Options', 'DENY');
+  } else {
+    // App routes with missing/invalid shop: still allow Shopify admin framing,
+    // otherwise the app renders as a blank white screen inside the admin iframe
+    // (a common App Store rejection reason). Restrict to admin.shopify.com only.
+    res.setHeader('Content-Security-Policy', 'frame-ancestors https://admin.shopify.com;');
   }
   next();
 });
@@ -259,11 +265,11 @@ app.get('/auth/callback', async (req, res) => {
         is_active = 1,
         uninstalled_at = NULL,
         billing_status = CASE
-          WHEN billing_status NOT IN ('active') THEN 'pending'
+          WHEN trial_used = 0 AND billing_status NOT IN ('active') THEN 'pending'
           ELSE billing_status
         END,
         trial_ends_at = CASE
-          WHEN billing_status NOT IN ('active') THEN NULL
+          WHEN trial_used = 0 AND billing_status NOT IN ('active') THEN NULL
           ELSE trial_ends_at
         END
     `, [shop, accessToken, refreshToken, expiresAt]);
@@ -341,9 +347,9 @@ app.get('/', async (req, res, next) => {
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
-    // Force re-auth if ?reauth=1 (deletes shop from DB, triggers fresh OAuth)
+    // Force re-auth if ?reauth=1 (soft-deactivate, triggers fresh OAuth; data survives)
     if (reauth === '1') {
-      await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+      await db.run('UPDATE merchants SET is_active = 0, access_token = NULL WHERE shop = $1', [shop]);
       return res.redirect(`/auth?shop=${shop}`);
     }
 
@@ -353,10 +359,11 @@ app.get('/', async (req, res, next) => {
       return res.redirect(`/auth?shop=${shop}`);
     }
 
-    // Force re-auth if merchant has a non-expiring token (no refresh_token) — API 2026-07 rejects them
+    // Force re-auth if merchant has a non-expiring token (no refresh_token) — API 2026-07 rejects them.
+    // Soft-deactivate instead of DELETE so FK-linked data (vendors, POs, products) survives re-install.
     if (!merchant.refresh_token) {
       console.log(`[Auth] ${shop} has non-expiring token, forcing re-auth for API 2026-07 compatibility`);
-      await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+      await db.run('UPDATE merchants SET is_active = 0, access_token = NULL WHERE shop = $1', [shop]);
       return res.redirect(`/auth?shop=${shop}`);
     }
 
@@ -1068,6 +1075,24 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
         console.log(`[Receive] Rolled back received_qty for line item ${lineItemId} (Shopify push failed)`);
       }
       console.warn(`[Receive] ${failedLineItemIds.size} item(s) rolled back. Total pushed: ${adjustments.length - failedLineItemIds.size} of ${adjustments.length}.`);
+
+      // Recompute PO status from actual received quantities — otherwise the PO
+      // stays 'received'/'partial' even though some (or all) items were rolled back.
+      const afterRollback = await db.all(`
+        SELECT ordered_qty, received_qty FROM po_line_items WHERE po_id = $1
+      `, [id]);
+
+      if (afterRollback.length === 0) return res.status(404).json({ error: 'PO not found' });
+
+      const totalOrdered = afterRollback.reduce((s, i) => s + (i.ordered_qty || 0), 0);
+      const totalReceived = afterRollback.reduce((s, i) => s + (i.received_qty || 0), 0);
+
+      let newStatus = 'sent';
+      if (totalReceived >= totalOrdered && totalOrdered > 0) newStatus = 'received';
+      else if (totalReceived > 0) newStatus = 'partial';
+
+      await db.run(`UPDATE purchase_orders SET status = $1 WHERE id = $2`, [newStatus, id]);
+      console.warn(`[Receive] PO ${id} status recomputed to '${newStatus}' after rollback`);
     }
   }
 
@@ -1291,7 +1316,7 @@ app.post('/api/billing/create', async (req, res) => {
     const trialEnd = new Date();
     trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
     await db.run(`
-      UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, shopify_charge_id = NULL
+      UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, shopify_charge_id = NULL, trial_used = 1
       WHERE shop = $2
     `, [trialEnd.toISOString(), shop]);
     console.log(`[Billing] TEST MODE: ${shop} activated with ${BILLING_PLAN.trial_days}d trial`);
@@ -1324,8 +1349,12 @@ app.post('/api/billing/create', async (req, res) => {
   }
 });
 
-// Billing test confirm (simulated approval for BILLING_TEST_MODE)
+// Billing test confirm (simulated approval for BILLING_TEST_MODE — dev only)
 app.get('/billing/test-confirm', async (req, res) => {
+  // Defense in depth: never reachable in production even if BILLING_TEST_MODE leaks
+  if (process.env.NODE_ENV === 'production' || process.env.BILLING_TEST_MODE !== 'true') {
+    return res.status(404).send('Not found');
+  }
   const { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop');
   // Already activated by /api/billing/create, just redirect to dashboard
@@ -1350,6 +1379,37 @@ app.get('/billing/confirm', async (req, res) => {
     // With GraphQL, the subscription is already active when they return
     const subId = subscription_id || charge_id;
 
+    // SECURITY: Verify with Shopify that this subscription actually exists and is ACTIVE.
+    // Never trust query params alone — anyone could otherwise activate billing without paying.
+    const verifyRes = await axios.post(
+      `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+      {
+        query: `
+          query {
+            currentAppInstallation {
+              activeSubscriptions {
+                id
+                status
+              }
+            }
+          }
+        `,
+      },
+      { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+
+    const activeSubs = verifyRes.data?.data?.currentAppInstallation?.activeSubscriptions || [];
+    const normalizedSubId = String(subId).replace(/^gid:\/\/shopify\/AppSubscription\//, '');
+    const verified = activeSubs.some(sub =>
+      sub.status === 'ACTIVE' &&
+      (String(sub.id) === String(subId) || String(sub.id).replace(/^gid:\/\/shopify\/AppSubscription\//, '') === normalizedSubId)
+    );
+
+    if (!verified) {
+      console.warn(`[Billing] ${shop} confirm rejected — no ACTIVE subscription matching ${subId}`);
+      return res.status(402).send('Subscription not found or not active. Please complete billing to continue.');
+    }
+
     // Calculate trial end date (7 days from now)
     const trialEnd = new Date();
     trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
@@ -1358,7 +1418,7 @@ app.get('/billing/confirm', async (req, res) => {
 
     await db.run(`
       UPDATE merchants
-      SET shopify_charge_id = $1, billing_status = $2, trial_ends_at = $3
+      SET shopify_charge_id = $1, billing_status = $2, trial_ends_at = $3, trial_used = 1
       WHERE shop = $4
     `, [String(subId), billingStatus, trialEnd.toISOString(), shop]);
 
@@ -1602,6 +1662,7 @@ app.post('/webhooks/gdpr', async (req, res) => {
       await db.run('DELETE FROM purchase_orders WHERE shop = $1', [shop]);
       await db.run('DELETE FROM products WHERE shop = $1', [shop]);
       await db.run('DELETE FROM vendors WHERE shop = $1', [shop]);
+      await db.run('DELETE FROM oauth_states WHERE shop = $1', [shop]);
       await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
       console.log(`[GDPR] shop/redact — all data deleted for ${shop}`);
       return res.status(200).send('OK');

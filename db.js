@@ -21,7 +21,8 @@ sqliteDb.exec(`
     trial_ends_at DATETIME,
     installed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     uninstalled_at DATETIME,
-    is_active INTEGER DEFAULT 1
+    is_active INTEGER DEFAULT 1,
+    trial_used INTEGER DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS vendors (
@@ -98,6 +99,8 @@ try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN trial_ends_at DATETIME;`);
 try { sqliteDb.exec(`ALTER TABLE products ADD COLUMN inventory_item_id INTEGER;`); } catch (_) {}
 try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN refresh_token TEXT;`); } catch (_) {}
 try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN expires_at TEXT;`); } catch (_) {}
+// Track whether a shop has ever started a trial — prevents infinite free trials via uninstall/reinstall cycling
+try { sqliteDb.exec(`ALTER TABLE merchants ADD COLUMN trial_used INTEGER DEFAULT 0;`); } catch (_) {}
 // Denormalize product info into po_line_items so POs still work if products are deleted later
 try { sqliteDb.exec(`ALTER TABLE po_line_items ADD COLUMN product_title TEXT;`); } catch (_) {}
 try { sqliteDb.exec(`ALTER TABLE po_line_items ADD COLUMN product_sku TEXT;`); } catch (_) {}
