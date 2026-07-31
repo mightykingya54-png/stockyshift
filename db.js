@@ -7,6 +7,9 @@ const sqliteDb = new Database(dbPath);
 // Enable WAL mode for better concurrent access
 sqliteDb.pragma('journal_mode = WAL');
 sqliteDb.pragma('foreign_keys = ON');
+// Wait up to 5s for a lock instead of failing instantly with SQLITE_BUSY
+// when two shops write concurrently (e.g., a sync transaction and a PO save).
+sqliteDb.pragma('busy_timeout = 5000');
 
 // ─── Schema ──────────────────────────────────────────────────────────────
 

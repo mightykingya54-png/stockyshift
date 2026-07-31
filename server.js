@@ -202,6 +202,24 @@ const BILLING_EXEMPT_PATHS = [
 if (process.env.NODE_ENV !== 'production') BILLING_EXEMPT_PATHS.push('/test-email');
 
 app.use('/api', async (req, res, next) => {
+  // CSRF defense: the session cookie is SameSite=None (required so the
+  // embedded iframe on admin.shopify.com can carry it), which means a
+  // malicious third-party site could trigger state-changing /api calls with
+  // the victim's cookie in standalone mode. Browsers send Origin on every
+  // cross-site POST — reject anything that didn't come from our own origin
+  // or the Shopify admin. (Missing Origin = same-origin navigation/curl,
+  // which cannot carry a CSRF victim's cookies anyway.)
+  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) {
+    const origin = req.headers.origin;
+    if (origin) {
+      let host = '';
+      try { host = new URL(origin).host; } catch { return res.status(403).json({ error: 'Forbidden' }); }
+      const allowed = ['stockyshift.com', 'admin.shopify.com', 'localhost'];
+      const ok = allowed.some(a => host === a || host.endsWith('.' + a) || host.startsWith('localhost:') || host.startsWith('127.0.0.1:'));
+      if (!ok) return res.status(403).json({ error: 'Forbidden' });
+    }
+  }
+
   // Allow preflight and exempt paths
   if (req.method === 'OPTIONS') return next();
   if (BILLING_EXEMPT_PATHS.some(p => req.path === p || req.path.startsWith(p + '/'))) return next();
@@ -1725,6 +1743,8 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
 // ─── Debug: check which API key is active (dev only) ─────────────────────
 if (process.env.NODE_ENV !== 'production') {
 app.get('/api/debug', (req, res) => {
+  // Debug-only: hide in production (same guard as /api/db-health)
+  if (process.env.NODE_ENV === 'production') return res.status(403).json({ error: 'Forbidden' });
   const key = process.env.SHOPIFY_API_KEY || 'NOT SET';
   res.json({
     api_key_prefix: key.substring(0, 8) + '...',
