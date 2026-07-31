@@ -348,8 +348,11 @@ app.get('/auth/callback', async (req, res) => {
     // earlier would burn a valid state on transient failures, and the duplicate-
     // delivery guard above already handles retries safely.
     await db.run('DELETE FROM oauth_states WHERE state = $1', [state || '']);
-    // Redirect merchant to the embedded app or dashboard
-    res.redirect(`/?shop=${shop}`);
+    // Redirect merchant into the EMBEDDED app inside the Shopify admin
+    // (matches /billing/confirm behavior — landing on the standalone /?shop=
+    // page after install is jarring and doesn't match App Store expectations)
+    const storeSlug = shop.replace(/\.myshopify\.com$/i, '');
+    res.redirect(`https://admin.shopify.com/store/${storeSlug}/apps/stockyshift`);
   } catch (err) {
     console.error('OAuth error:', err.response?.data || err.message);
     res.status(500).send('Installation failed. Please try again.');
