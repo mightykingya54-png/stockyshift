@@ -115,9 +115,8 @@ function verifySessionToken(token) {
 }
 
 // Middleware: authenticate via session token (Bearer) or session cookie.
-// Sets req.shop for use by getShop(). getShop() also accepts ?shop=/body
-// as a final fallback (routes verify getToken() before acting).
-const PUBLIC_SHOP_PATHS = new Set(['/api/billing/status', '/api/config', '/api/billing/create']);
+// Sets req.shop for use by getShop(). All API routes require authentication
+// via Bearer token (embedded) or session cookie (standalone).
 app.use((req, res, next) => {
   let authedShop = null;
   const authHeader = req.headers['authorization'] || '';
@@ -126,11 +125,6 @@ app.use((req, res, next) => {
     if (result) authedShop = result.shop;
   }
   if (!authedShop && req.session?.shop) authedShop = req.session.shop;
-  // Legacy: allow specific public routes to accept shop from body/query
-  // even without any session. These routes are audited to be safe.
-  if (!authedShop && PUBLIC_SHOP_PATHS.has(req.path)) {
-    authedShop = req.query.shop || req.body?.shop || null;
-  }
   req.shop = authedShop;
   next();
 });
@@ -400,15 +394,20 @@ app.get('/apps/stockyshift', async (req, res, next) => {
 
 // Helper: resolve the authenticated shop for this request, or null.
 // Priority: 1) Bearer token (JWT from App Bridge - embedded mode),
-//           2) Session cookie shop (standalone mode),
-//           3) Query/body shop as final fallback.
-// Routes verify getToken(shop) exists before acting, so the shop name
-// alone is insufficient to access another store's data without knowing
-// its access token (stored in DB).
+//           2) Session cookie shop (standalone mode).
+// The query/body fallback has been REMOVED to prevent unauthenticated
+// API access. Use a valid Bearer token or session cookie.
 function getShop(req) {
   if (req.shop) return req.shop;
   if (req.session?.shop) return req.session.shop;
-  return req.query.shop || req.body?.shop || null;
+  return null;
+}
+
+// Helper: requires an authenticated shop. Returns null and sends 401 if not authenticated.
+function requireShop(req, res) {
+  const shop = getShop(req);
+  if (!shop) { res.status(401).json({ error: 'Authentication required' }); return null; }
+  return shop;
 }
 
 // Helper: load merchant's access token with auto-refresh for expiring tokens (API 2026-07+)
@@ -508,7 +507,8 @@ function idToGid(type, id) {
 
 // Sync products from Shopify
 app.post('/api/sync-products', async (req, res) => {
-  const shop = getShop(req);
+  const shop = requireShop(req, res);
+  if (!shop) return;
   const token = await getToken(shop);
   if (!token) return res.status(401).json({ error: 'Shop not installed' });
 
@@ -608,8 +608,8 @@ app.post('/api/sync-products', async (req, res) => {
 
 // Get low stock products (below reorder point)
 app.get('/api/low-stock', async (req, res) => {
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   // Join products with vendors to show vendor info alongside low stock items
@@ -629,8 +629,8 @@ app.get('/api/low-stock', async (req, res) => {
 
 // Get all products
 app.get('/api/products', async (req, res) => {
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const products = await db.all(`
@@ -646,9 +646,9 @@ app.get('/api/products', async (req, res) => {
 
 // Update reorder point for a product
 app.post('/api/products/reorder-point', async (req, res) => {
-  const shop = getShop(req);
+  const shop = requireShop(req, res);
+  if (!shop) return;
   const { id, reorder_point, preferred_vendor_id } = req.body;
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   await db.run(`
@@ -661,8 +661,8 @@ app.post('/api/products/reorder-point', async (req, res) => {
 // ─── Vendor Routes ───────────────────────────────────────────────────────
 
 app.get('/api/vendors', async (req, res) => {
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const vendors = await db.all('SELECT * FROM vendors WHERE shop = $1 ORDER BY name', [shop]);
@@ -670,9 +670,10 @@ app.get('/api/vendors', async (req, res) => {
 });
 
 app.post('/api/vendors', async (req, res) => {
-  const shop = getShop(req);
+  const shop = requireShop(req, res);
+  if (!shop) return;
   const { name, email, min_order_amount, notes } = req.body;
-  if (!shop || !name || !email) return res.status(400).json({ error: 'Missing required fields' });
+  if (!name || !email) return res.status(400).json({ error: 'Missing required fields' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
@@ -686,9 +687,10 @@ app.post('/api/vendors', async (req, res) => {
 // Update vendor
 app.put('/api/vendors/:id', async (req, res) => {
   const { id } = req.params;
-  const shop = getShop(req);
+  const shop = requireShop(req, res);
+  if (!shop) return;
   const { name, email, min_order_amount, notes } = req.body;
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid vendor ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
   if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
@@ -704,8 +706,9 @@ app.put('/api/vendors/:id', async (req, res) => {
 // Delete vendor
 app.delete('/api/vendors/:id', async (req, res) => {
   const { id } = req.params;
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid vendor ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   // Check if vendor has POs
@@ -729,11 +732,13 @@ app.delete('/api/vendors/:id', async (req, res) => {
 
 
 app.post('/api/purchase-orders', async (req, res) => {
-  const shop = getShop(req);
+  const shop = requireShop(req, res);
+  if (!shop) return;
   const { vendor_id, items, notes } = req.body;
-  if (!shop || !vendor_id || !items?.length) {
+  if (!vendor_id || !items?.length) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
+  if (!/^\d+$/.test(vendor_id)) return res.status(400).json({ error: 'Invalid vendor ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
   // Verify vendor belongs to this shop
   const vendorCheck = await db.get('SELECT id FROM vendors WHERE id = $1 AND shop = $2', [vendor_id, shop]);
@@ -783,8 +788,9 @@ app.post('/api/purchase-orders', async (req, res) => {
 // Send PO email
 app.post('/api/purchase-orders/:id/send', async (req, res) => {
   const { id } = req.params;
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid PO ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   const po = await db.get(`
@@ -838,10 +844,28 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
 // Receive against PO (also updates inventory in Shopify)
 app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const { id } = req.params;
-  const shop = getShop(req);
+  const shop = requireShop(req, res);
+  if (!shop) return;
   const { items } = req.body; // [{line_item_id, received_qty}]
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid PO ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+
+  // Validate items shape and quantities
+  if (!Array.isArray(items)) {
+    return res.status(400).json({ error: 'items must be an array' });
+  }
+  for (const item of items) {
+    const qty = parseInt(item.received_qty);
+    if (!Number.isFinite(qty) || qty < 0) {
+      return res.status(400).json({ error: 'received_qty must be a non-negative integer' });
+    }
+    item.received_qty = qty;
+    const lineId = parseInt(item.line_item_id);
+    if (!Number.isFinite(lineId) || lineId < 1) {
+      return res.status(400).json({ error: 'line_item_id must be a positive integer' });
+    }
+    item.line_item_id = lineId;
+  }
 
   // Verify PO belongs to this shop
   const po = await db.get('SELECT id FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
@@ -1008,8 +1032,8 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
 });
 
 app.get('/api/purchase-orders', async (req, res) => {
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const pos = await db.all(`
@@ -1026,8 +1050,9 @@ app.get('/api/purchase-orders', async (req, res) => {
 // Get single PO with line items
 app.get('/api/purchase-orders/:id', async (req, res) => {
   const { id } = req.params;
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid PO ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
   const po = await db.get(`
@@ -1057,8 +1082,9 @@ app.get('/api/purchase-orders/:id', async (req, res) => {
 // Delete a purchase order (only draft POs can be deleted)
 app.delete('/api/purchase-orders/:id', async (req, res) => {
   const { id } = req.params;
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid PO ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
   const po = await db.get('SELECT status FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
@@ -1184,8 +1210,8 @@ async function createCharge(shop, token) {
 
 // Get billing status for the dashboard
 app.get('/api/billing/status', async (req, res) => {
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
 
   const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1', [shop]);
   if (!merchant) return res.json({ status: 'not_installed' });
@@ -1211,8 +1237,8 @@ app.get('/api/billing/status', async (req, res) => {
 
 // Initiate billing (create charge, redirect to Shopify)
 app.post('/api/billing/create', async (req, res) => {
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
 
   const token = await getToken(shop);
   if (!token) return res.status(401).json({ error: 'Not installed' });
@@ -1266,12 +1292,12 @@ app.get('/billing/test-confirm', async (req, res) => {
 // Callback from Shopify after merchant approves (or declines) billing
 app.get('/billing/confirm', async (req, res) => {
   const { charge_id, shop, subscription_id } = req.query;
-  if (!shop) return res.status(400).send('Missing shop');
+  if (!shop) return res.status(400).send('Missing shop parameter — this URL should only be accessed via Shopify billing redirect');
 
   // Merchant declined billing — mark it explicitly and redirect with the flag
   if (!charge_id && !subscription_id) {
     await db.run(`UPDATE merchants SET billing_status = 'declined' WHERE shop = $1`, [shop]);
-    return res.redirect(`/?shop=${shop}&billing=declined`);
+    return res.redirect(`/?shop=${encodeURIComponent(shop)}&billing=declined`);
   }
 
   const token = await getToken(shop);
@@ -1305,8 +1331,8 @@ app.get('/billing/confirm', async (req, res) => {
 
 // ─── Cancel pending subscriptions (for stuck billing) ─────────────────────
 app.post('/api/billing/cancel-pending', async (req, res) => {
-  const shop = getShop(req);
-  if (!shop) return res.status(400).json({ error: 'Missing shop' });
+  const shop = requireShop(req, res);
+  if (!shop) return;
   const token = await getToken(shop);
   if (!token) return res.status(401).json({ error: 'Not installed' });
 
@@ -1406,8 +1432,9 @@ app.get('/api/debug', (req, res) => {
 });
 }
 
-// Database health check (with 5s timeout)
+// Database health check (with 5s timeout). Blocked in production (no public health data).
 app.get('/api/db-health', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') return res.status(403).json({ error: 'Forbidden' });
   const failTimer = setTimeout(() => {
     if (!res.headersSent) res.status(500).json({ error: 'Database connection timed out after 5s' });
   }, 5000);
@@ -1434,11 +1461,16 @@ cron.schedule('0 8 * * *', async () => {
         AND email IS NOT NULL
         AND (
           billing_status = 'active'
-          OR (billing_status = 'trial' AND trial_ends_at IS NOT NULL AND datetime(trial_ends_at) > datetime('now'))
+          OR (billing_status = 'trial' AND trial_ends_at IS NOT NULL)
         )
     `);
 
+    const now = new Date();
     for (const merchant of merchants) {
+      // JS Date comparison (handles ISO 8601 correctly, unlike SQLite datetime())
+      if (merchant.billing_status === 'trial' && merchant.trial_ends_at && new Date(merchant.trial_ends_at) <= now) {
+        continue; // trial expired, skip
+      }
       const lowStock = await db.all(`
         SELECT p.*, v.name as vendor_name
         FROM products p
