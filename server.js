@@ -158,14 +158,16 @@ app.use(express.static('views'));
 // ─── Billing enforcement middleware ───────────────────────────────────────
 // Enforces paywall server-side — an expired/cancelled merchant cannot use
 // the API even if they bypass the client-side billing overlay.
+// NOTE: this middleware is mounted at '/api', so req.path here is RELATIVE
+// (e.g. '/billing/status', not '/api/billing/status').
 const BILLING_EXEMPT_PATHS = [
-  '/api/config',
-  '/api/billing/status',
-  '/api/billing/create',
-  '/api/db-health',
-  '/api/debug',
+  '/config',
+  '/billing/status',
+  '/billing/create',
+  '/db-health',
+  '/debug',
 ];
-if (process.env.NODE_ENV !== 'production') BILLING_EXEMPT_PATHS.push('/api/test-email');
+if (process.env.NODE_ENV !== 'production') BILLING_EXEMPT_PATHS.push('/test-email');
 
 app.use('/api', async (req, res, next) => {
   // Allow preflight and exempt paths
