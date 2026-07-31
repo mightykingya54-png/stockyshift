@@ -97,6 +97,8 @@ function verifySessionToken(token) {
   if (header.alg !== 'HS256') return null;
   // Must not be expired
   if (payload.exp < Date.now() / 1000) return null;
+  // Must not be used before its nbf (not-before) timestamp, with 60s clock skew tolerance
+  if (payload.nbf && payload.nbf > (Date.now() / 1000) + 60) return null;
   // Must be issued for our API key
   if (payload.aud !== SHOPIFY_API_KEY) return null;
 
@@ -135,7 +137,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Serve static dashboard
+// Redirect direct .html requests to extensionless versions so the route
+// handlers (which do contact email substitution) always serve them.
+app.get('/privacy.html', (_req, res) => res.redirect(301, '/privacy'));
+app.get('/terms.html', (_req, res) => res.redirect(301, '/terms'));
+
+// Serve static assets (favicon, robots, sitemap, etc.)
+// privacy.html and terms.html are above this middleware, so the redirect fires first.
 app.use(express.static('views'));
 
 // ─── Billing enforcement middleware ───────────────────────────────────────
@@ -282,19 +290,10 @@ app.get('/auth/callback', async (req, res) => {
       text: `Someone just installed StockyShift on ${shop}!\n\nInstall time: ${new Date().toISOString()}\nBilling status: pending (trial)\n\nView in Partner Dashboard:\nhttps://partners.shopify.com`,
     }).catch(err => console.warn(`[Notify] Failed to send install notification: ${err.message}`));
 
-    // Register uninstall webhook (async, non-blocking)
-    axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-      query: `mutation {
-        webhookSubscriptionCreate(topic: APP_UNINSTALLED, webhookSubscription: {
-          callbackUrl: "${APP_URL}/webhooks/app/uninstalled"
-          format: JSON
-        }) { userErrors { field message } }
-      }`
-    }, {
-      headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' }
-    }).catch(err => {
-      console.warn(`[Webhook] Could not register APP_UNINSTALLED for ${shop}: ${err.message}`);
-    });
+    // Webhooks are declared app-level in shopify.app.toml (app/uninstalled,
+    // app_subscriptions/update) — Shopify registers them for ALL shops that
+    // install this app, so no per-shop registration is needed here. Declaring
+    // them in both places creates duplicate subscriptions and double deliveries.
 
     // Fetch merchant email from Shopify API (async, non-blocking, GraphQL)
     axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
@@ -413,9 +412,10 @@ app.get('/apps/stockyshift', async (req, res, next) => {
     }
 
     // Force re-auth if old token (no refresh_token)
+    // Soft-deactivate instead of DELETE so FK-linked data (vendors, POs, products) survives re-install.
     if (!merchant.refresh_token) {
       console.log(`[Auth] ${shop} (via proxy) has non-expiring token, forcing re-auth`);
-      await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+      await db.run('UPDATE merchants SET is_active = 0, access_token = NULL WHERE shop = $1', [shop]);
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
@@ -656,7 +656,12 @@ app.post('/api/sync-products', async (req, res) => {
     const detail = err.response?.data || err.message;
     const raw = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
     console.error('Sync error:', raw, err.stack);
-    res.status(500).json({ error: 'Sync failed', detail: raw.substring(0, 500), stack: err.stack?.substring(0, 300) });
+    res.status(500).json({
+      error: 'Sync failed',
+      detail: raw.substring(0, 500),
+      // Only include stack trace in non-production to avoid leaking internals
+      ...(process.env.NODE_ENV !== 'production' ? { stack: err.stack?.substring(0, 300) } : {}),
+    });
   }
 });
 
@@ -1592,7 +1597,12 @@ cron.schedule('0 8 * * *', async () => {
           ).join('\n');
 
           // Link directly to the embedded app in Shopify admin (not standalone landing page)
-          const storeName = merchant.shop.replace('.myshopify.com', '');
+          // Strip .myshopify.com suffix, then replace dots with dashes —
+          // Shopify admin URL uses dashes for store names with dots
+          // (e.g. 'my.store.myshopify.com' → admin URL is 'my-store')
+          const storeName = merchant.shop
+            .replace('.myshopify.com', '')
+            .replace(/\./g, '-');
           const adminUrl = `https://admin.shopify.com/store/${storeName}/apps/stockyshift`;
 
           const emailText = `StockyShift — Low Stock Alert for ${merchant.shop}\n\n` +
@@ -1629,12 +1639,75 @@ app.post('/webhooks/app/uninstalled', async (req, res) => {
     return res.status(401).send('Invalid HMAC');
   }
 
+  // Defense in depth: verify topic header matches (prevents confusion attacks
+  // where a valid webhook for a different topic is replayed to this endpoint)
+  const topic = req.headers['x-shopify-topic'];
+  if (topic && topic !== 'app/uninstalled') {
+    console.warn(`[Webhook] Topic mismatch on /webhooks/app/uninstalled: got '${topic}'`);
+    return res.status(400).send('Topic mismatch');
+  }
+
   // Mark shop inactive but KEEP data — if merchant reinstalls within 48 hours,
   // their vendors, POs, and settings are restored. shop/redact (48h later) deletes everything.
   await db.run('UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = $1', [shop]);
 
   console.log(`[Webhook] ${shop} uninstalled StockyShift — marked inactive, data preserved (48h grace)`);
   res.status(200).send('OK');
+});
+
+// ─── Webhook: Subscription status changes (keeps billing in sync) ─────────
+// Without this, a merchant who cancels their subscription keeps billing_status='active'
+// in our DB → they retain full access indefinitely without paying.
+app.post('/webhooks/app/subscriptions_update', async (req, res) => {
+  const shop = req.headers['x-shopify-shop-domain'];
+  const hmac = req.headers['x-shopify-hmac-sha256'];
+  if (!shop) return res.status(400).send('Missing shop');
+  if (!verifyWebhook(req.rawBody, hmac)) {
+    console.warn(`[Webhook] Invalid HMAC for subscriptions_update from ${shop}`);
+    return res.status(401).send('Invalid HMAC');
+  }
+
+  try {
+    const payload = req.body;
+    const sub = payload?.app_subscription;
+    if (!sub) {
+      console.warn(`[Webhook] subscriptions_update from ${shop}: no app_subscription in payload`);
+      return res.status(200).send('OK');
+    }
+
+    const subStatus = (sub.status || '').toUpperCase();
+    const subId = String(sub.id || '');
+
+    // Map Shopify subscription status to our billing_status
+    // ACTIVE → 'active' (paid, in force)
+    // CANCELLED/DECLINED/EXPIRED/FROZEN → mark as such
+    const statusMap = {
+      'ACTIVE': 'active',
+      'CANCELLED': 'cancelled',
+      'DECLINED': 'declined',
+      'EXPIRED': 'expired',
+      'FROZEN': 'frozen',
+    };
+    const newStatus = statusMap[subStatus] || null;
+
+    if (newStatus) {
+      await db.run(
+        `UPDATE merchants
+         SET billing_status = $1,
+             shopify_charge_id = COALESCE($2, shopify_charge_id)
+         WHERE shop = $3 AND shopify_charge_id = $4`,
+        [newStatus, subId, shop, subId]
+      );
+      console.log(`[Webhook] ${shop} subscription ${subId} → '${newStatus}'`);
+    } else {
+      console.log(`[Webhook] ${shop} subscriptions_update: unknown status '${subStatus}' — no update`);
+    }
+
+    res.status(200).send('OK');
+  } catch (err) {
+    console.error(`[Webhook] subscriptions_update error for ${shop}:`, err.message);
+    res.status(200).send('OK'); // always 200 so Shopify doesn't retry
+  }
 });
 
 // ─── GDPR Webhooks (required for App Store review) ──────────────────────

@@ -106,6 +106,8 @@ try { sqliteDb.exec(`ALTER TABLE po_line_items ADD COLUMN product_title TEXT;`);
 try { sqliteDb.exec(`ALTER TABLE po_line_items ADD COLUMN product_sku TEXT;`); } catch (_) {}
 // Unique PO numbers per shop (prevents collision on rapid double-click)
 try { sqliteDb.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_po_number_shop ON purchase_orders(po_number, shop);`); } catch (_) {}
+// Index on po_line_items(po_id) — speeds up PO deletion and GDPR redact queries
+try { sqliteDb.exec(`CREATE INDEX IF NOT EXISTS idx_po_line_items_po_id ON po_line_items(po_id);`); } catch (_) {}
 
 // ─── Async Promise Wrapper ───────────────────────────────────────────────
 // Converts synchronous better-sqlite3 calls to async promises
