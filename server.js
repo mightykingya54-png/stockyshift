@@ -127,8 +127,10 @@ function verifySessionToken(token) {
 
   // Must be HS256
   if (header.alg !== 'HS256') return null;
-  // Must not be expired
-  if (payload.exp < Date.now() / 1000) return null;
+  // Must not be expired. Symmetric 300s tolerance with the nbf check: Shopify
+  // token issuer clocks can run ahead of this server, and a strict exp check
+  // then 401s perfectly valid tokens ("Session expired") for no reason.
+  if (payload.exp < Date.now() / 1000 - 300) return null;
   // Must not be used before its nbf (not-before) timestamp, with 5min clock skew
   // tolerance — Shopify's token issuer clock can be ahead of this server's, and
   // a strict nbf check then rejects perfectly valid tokens (=> "Session expired").
@@ -259,7 +261,7 @@ app.get('/terms', (req, res) => {
 
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
-const SCOPES = process.env.SCOPES || 'read_products,write_products,read_inventory,write_inventory';
+const SCOPES = process.env.SCOPES || 'write_inventory,read_inventory,read_products,read_locations';
 const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 
 // Step 1: Redirect merchant to Shopify authorization
@@ -312,9 +314,14 @@ app.get('/auth/callback', async (req, res) => {
     return res.status(403).send('State mismatch. Possible CSRF attack or expired link — try installing again.');
   }
 
-  // Consume the state AFTER successful token exchange below (not before) so a
-  // transient Shopify failure doesn't burn a valid state on retry.
-  // (Kept near the top for visibility — deletion happens at the end.)
+  // Consume the state IMMEDIATELY, as early as possible. The state is
+  // single-use, so a failed token exchange already forces a fresh /auth flow
+  // (the dashboard/install links always go through /auth first). Consuming
+  // early shrinks the CSRF window: once deleted, a second delivery of this
+  // callback cannot be accepted even if a leaked URL is replayed before the
+  // merchant installs. (A duplicate delivery is still handled gracefully:
+  // if the merchant is already active we let them in above.)
+  await db.run('DELETE FROM oauth_states WHERE state = $1', [state || '']);
 
   // Verify shop domain (same validation as /auth endpoint)
   if (!/^[a-zA-Z0-9][a-zA-Z0-9.-]*\.myshopify\.com$/.test(shop)) {
@@ -391,10 +398,7 @@ app.get('/auth/callback', async (req, res) => {
 
     // Store shop in session so embedded iframe reload works without ?shop= in URL
     req.session.shop = shop;
-    // Consume the single-use state NOW that the exchange succeeded — deleting it
-    // earlier would burn a valid state on transient failures, and the duplicate-
-    // delivery guard above already handles retries safely.
-    await db.run('DELETE FROM oauth_states WHERE state = $1', [state || '']);
+    // State was already consumed right after validation above (line ~324).
     // Redirect merchant into the EMBEDDED app inside the Shopify admin
     // (matches /billing/confirm behavior — landing on the standalone /?shop=
     // page after install is jarring and doesn't match App Store expectations)
@@ -432,8 +436,11 @@ app.get('/', async (req, res, next) => {
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
-    // Force re-auth if ?reauth=1 (soft-deactivate, triggers fresh OAuth; data survives)
-    if (reauth === '1') {
+    // Force re-auth if ?reauth=1 (soft-deactivate, triggers fresh OAuth; data survives).
+    // Only honor it for the authenticated session owner — without this check,
+    // anyone knowing a shop domain could GET /?shop=victim&reauth=1 and null
+    // the victim's token (forced re-auth DoS).
+    if (reauth === '1' && req.session?.shop === shop) {
       await db.run('UPDATE merchants SET is_active = 0, access_token = NULL WHERE shop = $1', [shop]);
       return res.redirect(`/auth?shop=${shop}`);
     }
@@ -721,9 +728,9 @@ async function runProductSync(shop, token) {
     let variantCount = 0;
     const seenVariantIds = [];
     const syncCompleted = !hasNextPage; // false if we hit MAX_PAGES (partial sync)
-    await db.transaction(async (tx) => {
+    await db.transaction((tx) => {
       for (const v of allVariants) {
-        await tx.run(`
+        tx.run(`
           INSERT INTO products (shopify_product_id, shopify_variant_id, inventory_item_id, shop, title, sku, current_stock, unit_cost)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
           ON CONFLICT(shop, shopify_variant_id) DO UPDATE SET
@@ -983,8 +990,8 @@ app.post('/api/purchase-orders', async (req, res) => {
     item.unit_cost = cost;
   }
 
-  const poId = await db.transaction(async (tx) => {
-    const poResult = await tx.get(`
+  const poId = await db.transaction((tx) => {
+    const poResult = tx.get(`
       INSERT INTO purchase_orders (shop, vendor_id, po_number, total, notes)
       VALUES ($1, $2, $3, $4, $5) RETURNING id
     `, [shop, vendor_id, poNumber, total, notes || '']);
@@ -993,8 +1000,8 @@ app.post('/api/purchase-orders', async (req, res) => {
 
     for (const item of items) {
       // Fetch product title/sku at creation time (denormalized — survives product deletion)
-      const product = await tx.get('SELECT title, sku FROM products WHERE id = $1', [item.product_id]);
-      await tx.run(`
+      const product = tx.get('SELECT title, sku FROM products WHERE id = $1', [item.product_id]);
+      tx.run(`
         INSERT INTO po_line_items (po_id, product_id, product_title, product_sku, ordered_qty, unit_cost)
         VALUES ($1, $2, $3, $4, $5, $6)
       `, [newPoId, item.product_id, product?.title || '', product?.sku || '', item.ordered_qty, item.unit_cost || 0]);
@@ -1062,6 +1069,13 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
 });
 
 // Receive against PO (also updates inventory in Shopify)
+// Serialize receives per PO. The local DB math is atomic (sync transaction),
+// but the Shopify inventory push happens AFTER commit — two concurrent
+// receives on the same PO would both push their deltas (double-apply) while
+// the UI shows only the first. A per-PO in-flight lock rejects the second
+// with 409 until the first finishes.
+const receiveLocks = new Map();
+
 app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const { id } = req.params;
   const shop = requireShop(req, res);
@@ -1069,6 +1083,12 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   const { items } = req.body; // [{line_item_id, received_qty}]
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid PO ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+
+  if (receiveLocks.has(id)) {
+    return res.status(409).json({ error: 'This PO is already being received — wait a moment and try again.' });
+  }
+  receiveLocks.set(id, true);
+  try {
 
   // Validate items shape and quantities (deltas, not absolute totals)
   if (!Array.isArray(items)) {
@@ -1098,7 +1118,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   // Collect inventory adjustments needed (computed during transaction below)
   const adjustments = [];
 
-  await db.transaction(async (tx) => {
+  await db.transaction((tx) => {
     for (const item of items) {
       // Atomic re-check INSIDE the transaction (better-sqlite3 is synchronous,
       // so no other request can interleave here — closes the TOCTOU race)
@@ -1115,7 +1135,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
         throw new Error(`Cannot receive more than ${current.ordered_qty} for this item (ordered: ${current.ordered_qty}, already received: ${oldQty})`);
       }
 
-      await tx.run(`
+      tx.run(`
         UPDATE po_line_items SET received_qty = $1 WHERE id = $2 AND po_id = $3
       `, [newQty, item.line_item_id, id]);
 
@@ -1230,46 +1250,54 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
       console.error(`[Receive] Shopify inventory update failed for ${shop}:`, err.response?.data || err.message);
     }
 
-    // Roll back received_qty for any items whose Shopify push failed
+    // Roll back received_qty for any items whose Shopify push failed.
+    // All rollback writes + the status recompute happen in ONE transaction:
+    // previously each UPDATE auto-committed separately, so a crash mid-rollback
+    // left received_qty diverging from Shopify inventory.
     if (failedLineItemIds.size > 0) {
-      for (const lineItemId of failedLineItemIds) {
-        // Subtract the delta (not a snapshot — current value is authoritative)
-        await db.run(`
-          UPDATE po_line_items SET received_qty = MAX(received_qty - $1, 0)
-          WHERE id = $2 AND po_id = $3
-        `, [adjustments.find(a => a.line_item_id === lineItemId)?.delta || 0, lineItemId, id]);
-        console.log(`[Receive] Rolled back received_qty for line item ${lineItemId} (Shopify push failed)`);
-      }
-      console.warn(`[Receive] ${failedLineItemIds.size} item(s) rolled back. Total pushed: ${adjustments.length - failedLineItemIds.size} of ${adjustments.length}.`);
+      await db.transaction((tx) => {
+        for (const lineItemId of failedLineItemIds) {
+          // Subtract the delta (not a snapshot — current value is authoritative)
+          tx.run(`
+            UPDATE po_line_items SET received_qty = MAX(received_qty - $1, 0)
+            WHERE id = $2 AND po_id = $3
+          `, [adjustments.find(a => a.line_item_id === lineItemId)?.delta || 0, lineItemId, id]);
+          console.log(`[Receive] Rolled back received_qty for line item ${lineItemId} (Shopify push failed)`);
+        }
+        console.warn(`[Receive] ${failedLineItemIds.size} item(s) rolled back. Total pushed: ${adjustments.length - failedLineItemIds.size} of ${adjustments.length}.`);
 
-      // Recompute PO status from actual received quantities — otherwise the PO
-      // stays 'received'/'partial' even though some (or all) items were rolled back.
-      const afterRollback = await db.all(`
-        SELECT ordered_qty, received_qty FROM po_line_items WHERE po_id = $1
-      `, [id]);
+        // Recompute PO status from actual received quantities — otherwise the PO
+        // stays 'received'/'partial' even though some (or all) items were rolled back.
+        const afterRollback = tx.all(`
+          SELECT ordered_qty, received_qty FROM po_line_items WHERE po_id = $1
+        `, [id]);
 
-      if (afterRollback.length === 0) return res.status(404).json({ error: 'PO not found' });
+        if (afterRollback.length === 0) throw new Error('PO not found');
 
-      const totalOrdered = afterRollback.reduce((s, i) => s + (i.ordered_qty || 0), 0);
-      const totalReceived = afterRollback.reduce((s, i) => s + (i.received_qty || 0), 0);
+        const totalOrdered = afterRollback.reduce((s, i) => s + (i.ordered_qty || 0), 0);
+        const totalReceived = afterRollback.reduce((s, i) => s + (i.received_qty || 0), 0);
 
-      let newStatus = 'sent';
-      if (totalReceived >= totalOrdered && totalOrdered > 0) newStatus = 'received';
-      else if (totalReceived > 0) newStatus = 'partial';
+        let newStatus = 'sent';
+        if (totalReceived >= totalOrdered && totalOrdered > 0) newStatus = 'received';
+        else if (totalReceived > 0) newStatus = 'partial';
 
-      // Clear received_at if the rollback drops the PO out of 'received' —
-      // otherwise the timestamp records a receipt that was rolled back.
-      await db.run(`
-        UPDATE purchase_orders
-        SET status = $1,
-            received_at = CASE WHEN $1 = 'received' THEN received_at ELSE NULL END
-        WHERE id = $2
-      `, [newStatus, id]);
-      console.warn(`[Receive] PO ${id} status recomputed to '${newStatus}' after rollback`);
+        // Clear received_at if the rollback drops the PO out of 'received' —
+        // otherwise the timestamp records a receipt that was rolled back.
+        tx.run(`
+          UPDATE purchase_orders
+          SET status = $1,
+              received_at = CASE WHEN $1 = 'received' THEN received_at ELSE NULL END
+          WHERE id = $2
+        `, [newStatus, id]);
+        console.warn(`[Receive] PO ${id} status recomputed to '${newStatus}' after rollback`);
+      });
     }
   }
 
   res.json({ success: true, adjustments: adjustments.length });
+  } finally {
+    receiveLocks.delete(id);
+  }
 });
 
 app.get('/api/purchase-orders', async (req, res) => {
@@ -1332,9 +1360,9 @@ app.delete('/api/purchase-orders/:id', async (req, res) => {
   if (!po) return res.status(404).json({ error: 'PO not found' });
   if (po.status !== 'draft') return res.status(400).json({ error: 'Only draft POs can be deleted' });
 
-  await db.transaction(async (tx) => {
-    await tx.run('DELETE FROM po_line_items WHERE po_id = $1', [id]);
-    await tx.run('DELETE FROM purchase_orders WHERE id = $1', [id]);
+  await db.transaction((tx) => {
+    tx.run('DELETE FROM po_line_items WHERE po_id = $1', [id]);
+    tx.run('DELETE FROM purchase_orders WHERE id = $1', [id]);
   });
 
   res.json({ success: true });
@@ -1490,7 +1518,20 @@ app.get('/api/billing/status', async (req, res) => {
           { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
         );
         const subs = verifyRes.data?.data?.currentAppInstallation?.activeSubscriptions || [];
-        if (subs.some(s => String(s.status).toUpperCase() === 'ACTIVE')) {
+        // Heal only when the ACTIVE subscription matches OUR charge_id (or its
+        // GID form). Trial charges carry gid://shopify/AppSubscription/101...,
+        // while webhook payloads historically used the bare numeric id — match
+        // either. Without this, an unrelated ACTIVE subscription (e.g. a
+        // second app's charge, or a stale leftover) could flip this merchant
+        // to 'active' when they have no paid plan with us.
+        const healed = subs.some(s =>
+          String(s.status).toUpperCase() === 'ACTIVE' &&
+          (!merchant.shopify_charge_id ||
+            String(s.id) === String(merchant.shopify_charge_id) ||
+            String(s.id).replace(/^gid:\/\/shopify\/AppSubscription\//, '') ===
+              String(merchant.shopify_charge_id).replace(/^gid:\/\/shopify\/AppSubscription\//, ''))
+        );
+        if (healed) {
           await db.run(`UPDATE merchants SET billing_status = 'active', trial_ends_at = NULL WHERE shop = $1`, [shop]);
           merchant.billing_status = 'active';
           console.log(`[Billing] ${shop} trial expired but Shopify subscription ACTIVE — healed to 'active'`);
@@ -1728,10 +1769,12 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
       }
     }
 
-    // Clear charge_id from DB if we canceled successfully
-    if (canceled.length > 0) {
-      await db.run('UPDATE merchants SET shopify_charge_id = NULL, billing_status = NULL WHERE shop = $1', [shop]);
-    }
+    // Clear charge_id from DB if we canceled successfully.
+    // billing_status -> 'pending' (NOT NULL): NULL would permanently lock the
+    // merchant out of billing — the dashboard's billing overlay only renders
+    // for 'pending'/'trial'/expired states, so a NULL status with no charge_id
+    // leaves them with a non-functional app and no way back to the trial page.
+    await db.run("UPDATE merchants SET shopify_charge_id = NULL, billing_status = 'pending' WHERE shop = $1", [shop]);
 
     res.json({ canceled, message: `Canceled ${canceled.length} pending subscriptions`, db_charge_id: dbChargeId, found_subs: foundSubs });
   } catch (err) {
@@ -1757,6 +1800,20 @@ app.get('/api/debug', (req, res) => {
   });
 });
 }
+
+// Render healthcheck path — 200 only when the DB is actually reachable.
+// Deliberately unauthenticated (Render pings it without headers); reveals
+// nothing beyond whether the app can serve. If the mounted disk fails, this
+// 503s and Render restarts the service instead of serving a dead dashboard.
+app.get('/healthz', async (req, res) => {
+  try {
+    await db.get('SELECT 1 AS ok');
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('[Health] /healthz DB check failed:', err.message);
+    res.status(503).json({ ok: false });
+  }
+});
 
 // Database health check (with 5s timeout). Blocked in production (no public health data).
 app.get('/api/db-health', async (req, res) => {
@@ -1892,7 +1949,17 @@ app.post('/webhooks/app/uninstalled', async (req, res) => {
 
   // Mark shop inactive but KEEP data — if merchant reinstalls within 48 hours,
   // their vendors, POs, and settings are restored. shop/redact (48h later) deletes everything.
-  await db.run('UPDATE merchants SET is_active = 0, uninstalled_at = CURRENT_TIMESTAMP WHERE shop = $1', [shop]);
+  // Purge credentials: a store that revoked access must not keep a live token.
+  // (Reinstall re-fetches fresh tokens, so the 48h restore window is unaffected.)
+  await db.run(`
+    UPDATE merchants
+    SET is_active = 0,
+        uninstalled_at = CURRENT_TIMESTAMP,
+        access_token = NULL,
+        refresh_token = NULL,
+        expires_at = NULL
+    WHERE shop = $1
+  `, [shop]);
 
   console.log(`[Webhook] ${shop} uninstalled StockyShift — marked inactive, data preserved (48h grace)`);
   res.status(200).send('OK');
@@ -1934,14 +2001,30 @@ app.post('/webhooks/app/subscriptions_update', async (req, res) => {
     const newStatus = statusMap[subStatus] || null;
 
     if (newStatus) {
-      await db.run(
+      const upd = await db.run(
         `UPDATE merchants
          SET billing_status = $1,
              shopify_charge_id = COALESCE($2, shopify_charge_id)
          WHERE shop = $3 AND shopify_charge_id = $4`,
         [newStatus, subId, shop, subId]
       );
-      console.log(`[Webhook] ${shop} subscription ${subId} → '${newStatus}'`);
+      if (upd.changes === 0) {
+        // Subscription changed but no merchant row has this charge_id. This
+        // catches GID-format drift: we store gid://shopify/AppSubscription/101...,
+        // while webhook payloads sometimes carry the bare numeric id. Log it
+        // loudly — silent 0-row updates hide billing desync.
+        console.warn(`[Webhook] ${shop} subscription ${subId} → '${newStatus}' but NO merchant row matched exact charge_id — retrying with normalized GID`);
+        const norm = (id) => String(id || '').replace(/^gid:\/\/shopify\/AppSubscription\//, '');
+        const merchantRow = await db.get('SELECT shopify_charge_id FROM merchants WHERE shop = $1', [shop]);
+        if (merchantRow && norm(merchantRow.shopify_charge_id) === norm(subId)) {
+          const upd2 = await db.run('UPDATE merchants SET billing_status = $1 WHERE shop = $2', [newStatus, shop]);
+          console.log(`[Webhook] ${shop} charge_id normalized match (${subId}) → '${newStatus}' (${upd2.changes} row)`);
+        } else {
+          console.warn(`[Webhook] ${shop} no charge_id match for ${subId} — webhook ignored (stored: ${merchantRow?.shopify_charge_id || '(none)'})`);
+        }
+      } else {
+        console.log(`[Webhook] ${shop} subscription ${subId} → '${newStatus}'`);
+      }
     } else {
       console.log(`[Webhook] ${shop} subscriptions_update: unknown status '${subStatus}' — no update`);
     }

@@ -171,38 +171,49 @@ const db = {
     try { sqliteDb.exec(sql); return Promise.resolve(); }
     catch (e) { return Promise.reject(e); }
   },
-  // Transaction — wraps fn in BEGIN/COMMIT with a tx object
-  transaction: async (fn) => {
-    sqliteDb.exec('BEGIN');
+  // Transaction — native better-sqlite3 (fully synchronous). The previous
+  // wrapper did async BEGIN → await fn() → COMMIT on the shared connection:
+  // the await yielded to the event loop mid-transaction, so a concurrent
+  // request could BEGIN (throwing "cannot start a transaction within a
+  // transaction"), and ITS catch executed ROLLBACK — which aborted the
+  // FIRST request's open transaction, then its COMMIT hit "no transaction
+  // is active" while earlier writes had already auto-committed. Real
+  // corruption vector. Native transactions run the whole callback with no
+  // event-loop yield, so nothing can interleave.
+  // IMPORTANT: the callback MUST be synchronous (tx.* are sync; no awaits).
+  transaction: (fn) => {
+    const tx = {
+      get: (sql, params) => {
+        const { sql: s, params: p } = toSqlite(sql, params);
+        if (/^\s*INSERT\s/i.test(s) && /RETURNING/i.test(s)) {
+          const cleanSql = s.replace(/\s+RETURNING\s+\S+/i, '');
+          const info = sqliteDb.prepare(cleanSql).run(...(p || []));
+          return { id: info.lastInsertRowid };
+        }
+        return sqliteDb.prepare(s).get(...(p || []));
+      },
+      all: (sql, params) => {
+        const { sql: s, params: p } = toSqlite(sql, params);
+        return sqliteDb.prepare(s).all(...(p || []));
+      },
+      run: (sql, params) => {
+        const { sql: s, params: p } = toSqlite(sql, params);
+        const stmt = sqliteDb.prepare(s);
+        const info = (p && p.length > 0) ? stmt.run(...p) : stmt.run();
+        return { changes: info.changes, lastInsertRowid: info.lastInsertRowid };
+      },
+    };
     try {
-      // Create a tx object with the same .get/.all/.run interface
-      const tx = {
-        get: (sql, params) => {
-          const { sql: s, params: p } = toSqlite(sql, params);
-          if (/^\s*INSERT\s/i.test(s) && /RETURNING/i.test(s)) {
-            const cleanSql = s.replace(/\s+RETURNING\s+\S+/i, '');
-            const info = sqliteDb.prepare(cleanSql).run(...(p || []));
-            return { id: info.lastInsertRowid };
-          }
-          return sqliteDb.prepare(s).get(...(p || []));
-        },
-        all: (sql, params) => {
-          const { sql: s, params: p } = toSqlite(sql, params);
-          return sqliteDb.prepare(s).all(...(p || []));
-        },
-        run: (sql, params) => {
-          const { sql: s, params: p } = toSqlite(sql, params);
-          const stmt = sqliteDb.prepare(s);
-          const info = (p && p.length > 0) ? stmt.run(...p) : stmt.run();
-          return { changes: info.changes, lastInsertRowid: info.lastInsertRowid };
-        },
-      };
-      const result = await fn(tx);
-      sqliteDb.exec('COMMIT');
-      return result;
+      const wrapped = sqliteDb.transaction(() => {
+        const result = fn(tx);
+        if (result && typeof result.then === 'function') {
+          throw new Error('db.transaction callback must be synchronous — remove all awaits inside it');
+        }
+        return result;
+      });
+      return Promise.resolve(wrapped());
     } catch (e) {
-      sqliteDb.exec('ROLLBACK');
-      throw e;
+      return Promise.reject(e);
     }
   },
 };
