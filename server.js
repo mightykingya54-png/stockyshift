@@ -149,6 +149,13 @@ function verifySessionToken(token) {
   const match = dest.match(/https:\/\/([^/]+)/);
   if (!match) return null;
 
+  // Validate issuer (App Bridge spec): iss is "https://{shop}.myshopify.com/admin"
+  // — must be the SAME shop as dest. Prevents a leaked token for shop B from
+  // being replayed against shop A (the aud/signature checks alone can't catch
+  // this if the secret is shared across shops).
+  const issMatch = (payload.iss || '').match(/https:\/\/([^/]+)/);
+  if (!issMatch || issMatch[1] !== match[1]) return null;
+
   return { shop: match[1], payload };
 }
 
@@ -616,13 +623,10 @@ function idToGid(type, id) {
   return `gid://shopify/${type}/${id}`;
 }
 
-// Sync products from Shopify
-app.post('/api/sync-products', async (req, res) => {
-  const shop = requireShop(req, res);
-  if (!shop) return;
-  const token = await getToken(shop);
-  if (!token) return res.status(401).json({ error: 'Shop not installed' });
-
+// Core sync logic — shared by the manual sync route and the daily auto-sync
+// cron, so the 8 AM low-stock alerts run on fresh stock. Without auto-sync,
+// stock goes stale the moment a merchant sells after their last manual sync.
+async function runProductSync(shop, token) {
   try {
     // Fetch all products + variants + inventory via GraphQL
     const allVariants = [];
@@ -721,7 +725,22 @@ app.post('/api/sync-products', async (req, res) => {
     // partial: true when MAX_PAGES was hit — the merchant only saw part of
     // their catalog and must know, or they'll set reorder points on half
     // their SKUs and miss low-stock alerts on the rest.
-    res.json({ synced: variantCount, partial: !syncCompleted });
+    return { synced: variantCount, partial: !syncCompleted };
+  } catch (err) {
+    throw err; // caller (route or cron) decides how to surface the error
+  }
+}
+
+// Sync products from Shopify (manual trigger)
+app.post('/api/sync-products', async (req, res) => {
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  const token = await getToken(shop);
+  if (!token) return res.status(401).json({ error: 'Shop not installed' });
+
+  try {
+    const result = await runProductSync(shop, token);
+    res.json(result);
   } catch (err) {
     const detail = err.response?.data || err.message;
     const raw = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
@@ -1694,6 +1713,31 @@ app.get('/api/db-health', async (req, res) => {
   } catch (err) {
     clearTimeout(failTimer);
     if (!res.headersSent) res.status(500).json({ connected: false, error: err.message });
+  }
+});
+
+// ─── Cron: Daily Auto-Sync (07:45) + Low Stock Check (08:00) ─────────────
+
+// Auto-sync every active merchant's products BEFORE the low-stock check so
+// alerts fire on fresh stock levels. Manual-only sync meant a merchant who
+// sold 50 units after syncing got 8 AM alerts with stale numbers.
+cron.schedule('45 7 * * *', async () => {
+  console.log('[Cron] Auto-syncing products for all active merchants...');
+  try {
+    const merchants = await db.all('SELECT shop FROM merchants WHERE is_active = 1');
+    for (const m of merchants) {
+      try {
+        const token = await getToken(m.shop);
+        if (!token) continue;
+        const result = await runProductSync(m.shop, token);
+        console.log(`[Cron] Auto-sync ${m.shop}: ${result.synced} variants${result.partial ? ' (partial — catalog exceeds 4,000 variants)' : ''}`);
+      } catch (err) {
+        // One shop's failure must not stop the rest of the daily run
+        console.error(`[Cron] Auto-sync failed for ${m.shop}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.error('[Cron] Auto-sync error:', err.message);
   }
 });
 
