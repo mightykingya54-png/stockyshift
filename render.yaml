@@ -51,3 +51,6 @@ services:
       # Billing: set to "false" for real charges. Use "true" while in development.
       - key: BILLING_TEST_MODE
         value: "false"
+      # Install notification — gets an email every time someone installs StockyShift
+      - key: NOTIFY_EMAIL
+        value: stockyshift@stockyshift.com

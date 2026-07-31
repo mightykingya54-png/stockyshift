@@ -239,6 +239,14 @@ app.get('/auth/callback', async (req, res) => {
         END
     `, [shop, accessToken, refreshToken, expiresAt]);
 
+    // Notify founder of new install (async, non-blocking)
+    const notifyEmail = process.env.NOTIFY_EMAIL || 'stockyshift@stockyshift.com';
+    sendPOEmail({
+      to: notifyEmail,
+      subject: `🎉 New install: ${shop}`,
+      text: `Someone just installed StockyShift on ${shop}!\n\nInstall time: ${new Date().toISOString()}\nBilling status: pending (trial)\n\nView in Partner Dashboard:\nhttps://partners.shopify.com`,
+    }).catch(err => console.warn(`[Notify] Failed to send install notification: ${err.message}`));
+
     // Register uninstall webhook (async, non-blocking)
     axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
       query: `mutation {
