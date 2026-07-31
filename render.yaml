@@ -51,6 +51,9 @@ services:
       # Billing: set to "false" for real charges. Use "true" while in development.
       - key: BILLING_TEST_MODE
         value: "false"
+      # Explicitly disable dev-only billing bypass in production (defense in depth)
+      - key: SKIP_BILLING
+        value: "false"
       # Install notification — gets an email every time someone installs StockyShift
       - key: NOTIFY_EMAIL
         value: stockyshift@stockyshift.com

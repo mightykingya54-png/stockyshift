@@ -60,8 +60,10 @@ app.use(session({
   saveUninitialized: false,
   cookie: {
     maxAge: 86400000, // 24 hours
-    sameSite: 'none',
-    secure: true,
+    // Secure + SameSite=None required on HTTPS (production).
+    // Local dev over http://localhost would refuse the cookie otherwise.
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    secure: process.env.NODE_ENV === 'production',
   },
 }));
 
@@ -710,9 +712,23 @@ app.post('/api/products/reorder-point', async (req, res) => {
   const { id, reorder_point, preferred_vendor_id } = req.body;
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
+  const productId = parseInt(id);
+  if (!Number.isInteger(productId) || productId < 1) {
+    return res.status(400).json({ error: 'Invalid product ID' });
+  }
+
+  // Validate reorder_point: must be a non-negative integer (defaults to 0)
+  let reorderPoint = 0;
+  if (reorder_point !== undefined && reorder_point !== null && reorder_point !== '') {
+    reorderPoint = parseInt(reorder_point);
+    if (!Number.isInteger(reorderPoint) || reorderPoint < 0) {
+      return res.status(400).json({ error: 'Reorder point must be a non-negative integer' });
+    }
+  }
+
   await db.run(`
     UPDATE products SET reorder_point = $1, preferred_vendor_id = $2 WHERE id = $3 AND shop = $4
-  `, [reorder_point || 0, preferred_vendor_id || null, id, shop]);
+  `, [reorderPoint, preferred_vendor_id || null, productId, shop]);
 
   res.json({ success: true });
 });
@@ -804,7 +820,9 @@ app.post('/api/purchase-orders', async (req, res) => {
   if (!vendorCheck) return res.status(400).json({ error: 'Vendor not found' });
 
   // Generate PO number with random suffix to prevent collision on rapid double-click
-  const poNumber = `PO-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+  // 4-byte random suffix: 2^32 possibilities per millisecond — collision
+  // effectively impossible (2-byte suffix was 1/65536 per same-ms pair)
+  const poNumber = `PO-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
   let total = 0;
 
   // Calculate total with input validation
