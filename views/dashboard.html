@@ -979,6 +979,25 @@
         return showToast('Add at least one vendor first.', 'error');
       }
 
+      // Blank-store guard: with zero synced products the multi-PO modal would
+      // render an empty table and "Create" would just fail confusingly.
+      // (The App Store reviewer will test on a brand-new store — this is the
+      // first thing they'd click.)
+      if (products.length === 0) {
+        const modal = document.getElementById('modalContent');
+        modal.className = 'modal';
+        modal.innerHTML = `
+          <h2>No Products Synced</h2>
+          <p style="color:#666;margin-bottom:16px">Your store has no products in StockyShift yet. Sync your Shopify products first — then you can create purchase orders.</p>
+          <div class="btn-row">
+            <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="closeModal();syncProducts()">⟳ Sync Products Now</button>
+          </div>
+        `;
+        document.getElementById('modalOverlay').classList.add('show');
+        return;
+      }
+
       const modal = document.getElementById('modalContent');
       modal.className = 'modal modal-wide';
 
