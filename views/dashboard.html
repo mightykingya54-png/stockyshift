@@ -484,6 +484,25 @@
 
       let res = await doFetch();
 
+      // Server says "Shopify connection expired" (401 + reauth flag). Our
+      // session token is fine — Shopify's token died (store uninstalled,
+      // access revoked). Skip the session-token retry and go straight to
+      // reconnect: retrying would hit the sync throttle (429) and the
+      // reconnect would never trigger.
+      if (res.status === 401) {
+        const body401 = await res.clone().json().catch(() => null);
+        if (body401?.reauth) {
+          if (shop) {
+            try {
+              window.top.location.href = '/auth?shop=' + encodeURIComponent(shop);
+            } catch (e) {
+              window.open('/auth?shop=' + encodeURIComponent(shop), '_blank');
+            }
+          }
+          throw new Error(body401.error || 'Shopify connection expired');
+        }
+      }
+
       // If the token was rejected (expired/invalid), force-refresh once and retry
       if (res.status === 401 && __appBridgeApp) {
         __tokenCache.exp = 0; // invalidate

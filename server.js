@@ -542,6 +542,29 @@ function requireShop(req, res) {
   return shop;
 }
 
+// Shopify returns this exact message when the access token is invalid or
+// revoked (store uninstalled the app, token rotated, etc.). Any route that
+// talks to Shopify must treat this as "connection expired" and return 401
+// so the dashboard can trigger the reconnect flow — NOT a generic 500.
+function isShopifyAuthError(err) {
+  const status = err?.response?.status;
+  const msg = String(err?.response?.data?.errors || err?.message || '');
+  return status === 401 || msg.includes('Invalid API key or access token');
+}
+
+// A dead Shopify connection: soft-deactivate + purge tokens (data preserved,
+// reinstall via /auth restores everything). Mirrors the uninstall webhook —
+// covers cases where that webhook never fired (not registered, or Shopify
+// revoked the token without delivering it).
+async function expireShopifyConnection(shop) {
+  await db.run(`
+    UPDATE merchants
+    SET is_active = 0, access_token = NULL, refresh_token = NULL, expires_at = NULL
+    WHERE shop = $1
+  `, [shop]);
+  console.warn(`[Auth] ${shop}: Shopify rejected credentials — connection expired, merchant soft-deactivated (data preserved for reinstall)`);
+}
+
 // Helper: load merchant's access token with auto-refresh for expiring tokens (API 2026-07+)
 async function refreshShopifyToken(shop, oldRefreshToken) {
   const params = new URLSearchParams({
@@ -800,6 +823,13 @@ app.post('/api/sync-products', async (req, res) => {
     const result = await runProductSync(shop, token);
     res.json(result);
   } catch (err) {
+    // Dead token (store uninstalled or revoked access): tell the dashboard to
+    // reconnect instead of showing a cryptic 500. Without this, the user sees
+    // "Sync failed: Invalid API key or access token" and is stuck.
+    if (isShopifyAuthError(err)) {
+      await expireShopifyConnection(shop);
+      return res.status(401).json({ error: 'Shopify connection expired — reconnect to continue.', reauth: true });
+    }
     const detail = err.response?.data || err.message;
     const raw = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
     console.error('Sync error:', raw, err.stack);
@@ -1230,6 +1260,13 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
             await db.run('UPDATE products SET current_stock = current_stock + $1 WHERE id = $2 AND shop = $3',
               [adj.delta, adj.product_id, shop]);
           } catch (itemErr) {
+            // Dead connection (store uninstalled / token revoked): surface a
+            // reconnect prompt instead of rolling everything back into a
+            // "received" state that Shopify never saw.
+            if (isShopifyAuthError(itemErr)) {
+              await expireShopifyConnection(shop);
+              return res.status(401).json({ error: 'Shopify connection expired — reconnect to continue.', reauth: true });
+            }
             failedLineItemIds.add(adj.line_item_id);
             console.error(`[Receive] Failed to push inventory for item ${adj.inventory_item_id} (${shop}):`, itemErr.message);
           }
@@ -1243,6 +1280,12 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
         console.warn(`[Receive] No locations found for ${shop} — Shopify inventory not updated`);
       }
     } catch (err) {
+      // Dead connection on the locations query (the first Shopify call):
+      // reconnect prompt, same as above.
+      if (isShopifyAuthError(err)) {
+        await expireShopifyConnection(shop);
+        return res.status(401).json({ error: 'Shopify connection expired — reconnect to continue.', reauth: true });
+      }
       // Entire Shopify push failed — all adjustments need rollback
       for (const adj of adjustments) {
         failedLineItemIds.add(adj.line_item_id);
@@ -1849,6 +1892,10 @@ cron.schedule('45 7 * * *', async () => {
       } catch (err) {
         // One shop's failure must not stop the rest of the daily run
         console.error(`[Cron] Auto-sync failed for ${m.shop}: ${err.message}`);
+        // Dead connection: stop retrying every day — expire it (data preserved)
+        if (isShopifyAuthError(err)) {
+          await expireShopifyConnection(m.shop);
+        }
       }
     }
   } catch (err) {
