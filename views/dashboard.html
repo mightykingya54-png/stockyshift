@@ -84,10 +84,6 @@
       border-bottom: 1px solid #f0f1f4;
     }
     tr:hover td { background: #f8f9fc; }
-    /* Subtle zebra striping on dashboard tables (not modals — those have
-       their own selected/hover states) */
-    .card table tr:nth-child(even) td { background: #fbfbfd; }
-    .card table tr:nth-child(even):hover td { background: #f4f6fb; }
 
     .badge {
       display: inline-block;
@@ -137,43 +133,6 @@
     }
     .stat-card .number { font-size: 28px; font-weight: 700; color: #1a1a2e; }
     .stat-card .label { font-size: 12px; color: #888; margin-top: 4px; }
-
-    /* Header tagline + first-run onboarding */
-    .header-tagline { font-size: 12px; color: #888; margin-top: 3px; }
-    .header-actions { display: flex; align-items: center; }
-
-    .onboarding-card {
-      background: white;
-      border-radius: 10px;
-      padding: 18px 22px;
-      margin-bottom: 16px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-      border: 1px solid #e8ecf3;
-    }
-    .onboarding-card h3 { font-size: 15px; margin: 0 0 14px; color: #1a1a2e; }
-    .onboarding-steps { display: flex; flex-direction: column; gap: 10px; }
-    .step {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .step-num {
-      width: 26px;
-      height: 26px;
-      border-radius: 50%;
-      background: #4a6cf7;
-      color: white;
-      font-size: 13px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-    .step-body { display: flex; flex-direction: column; flex: 1; }
-    .step-body strong { font-size: 13px; color: #1a1a2e; }
-    .step-body span { font-size: 12px; color: #888; }
-    .step .btn { flex-shrink: 0; }
 
     .modal-overlay {
       display: none;
@@ -393,57 +352,18 @@
     <div>
       <h1>StockyShift</h1>
       <span class="shop-name" id="shopName"></span>
-      <div class="header-tagline">Purchase orders, costs &amp; low-stock alerts for your Shopify store</div>
     </div>
-    <div class="header-actions">
+    <div>
       <button class="btn btn-primary btn-sm" id="syncBtn" onclick="syncProducts()">⟳ Sync Products</button>
     </div>
   </div>
 
   <div class="container">
     <div class="tabs">
-      <button class="tab active" data-tab="low-stock">Low Stock</button>
-      <button class="tab" data-tab="products">Products</button>
-      <button class="tab" data-tab="vendors">Vendors</button>
-      <button class="tab" data-tab="orders">Purchase Orders</button>
-    </div>
-
-    <!-- First-run guide: shown until the store has synced products -->
-    <div id="onboarding" class="hidden">
-      <div class="onboarding-card">
-        <h3>Get started in 4 steps</h3>
-        <div class="onboarding-steps">
-          <div class="step">
-            <span class="step-num">1</span>
-            <div class="step-body">
-              <strong>Sync your products</strong>
-              <span>Import your Shopify catalog</span>
-            </div>
-            <button class="btn btn-primary btn-sm" onclick="syncProducts()">Sync Now</button>
-          </div>
-          <div class="step">
-            <span class="step-num">2</span>
-            <div class="step-body">
-              <strong>Set reorder points</strong>
-              <span>Choose the stock level to reorder at</span>
-            </div>
-          </div>
-          <div class="step">
-            <span class="step-num">3</span>
-            <div class="step-body">
-              <strong>Add vendors</strong>
-              <span>Your suppliers — email &amp; minimum order</span>
-            </div>
-          </div>
-          <div class="step">
-            <span class="step-num">4</span>
-            <div class="step-body">
-              <strong>Create purchase orders</strong>
-              <span>Order stock, email PDFs, track receipts</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      <button class="tab active" data-tab="low-stock">⚠ Low Stock</button>
+      <button class="tab" data-tab="products">📦 Products</button>
+      <button class="tab" data-tab="vendors">🏢 Vendors</button>
+      <button class="tab" data-tab="orders">📄 Purchase Orders</button>
     </div>
 
     <div class="loading" id="initialLoading" style="text-align:center;padding:60px 20px;color:#888;font-size:15px;">
@@ -737,22 +657,18 @@
         let loading = document.getElementById('initialLoading');
         if (loading) loading.style.display = 'none';
 
-        // Show the 4-step guide until the store has synced products
-        const onboarding = document.getElementById('onboarding');
-        if (onboarding) onboarding.classList.toggle('hidden', products.length > 0);
-
         const statsHtml = `
           <div class="stat-card">
-            <div class="number" style="color:${lowStock.length > 0 ? '#dc2626' : '#059669'}">${lowStock.length}</div>
-            <div class="label">Low stock products</div>
+            <div class="number">${lowStock.length}</div>
+            <div class="label">Products below reorder point</div>
           </div>
           <div class="stat-card">
             <div class="number">${products.length}</div>
-            <div class="label">Products synced</div>
+            <div class="label">Total products synced</div>
           </div>
           <div class="stat-card">
             <div class="number">${products.filter(p => p.reorder_point > 0).length}</div>
-            <div class="label">Reorder points set</div>
+            <div class="label">Products with reorder point set</div>
           </div>
         `;
         document.getElementById('statsRow').innerHTML = statsHtml;
