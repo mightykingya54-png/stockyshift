@@ -1640,7 +1640,7 @@ async function createCharge(shop, token) {
         test: process.env.BILLING_TEST_MODE === 'true',
       },
     },
-    { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } }
+    { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 15000 }
   );
 
   const data = response.data.data?.appSubscriptionCreate;

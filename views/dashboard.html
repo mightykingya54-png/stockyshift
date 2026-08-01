@@ -50,6 +50,9 @@
       font-weight: 600;
     }
 
+    /* Visible keyboard focus (accessibility) */
+    :focus-visible { outline: 2px solid #4a6cf7; outline-offset: 2px; }
+
     .card {
       background: white;
       border-radius: 8px;
@@ -92,10 +95,10 @@
       font-size: 11px;
       font-weight: 600;
     }
-    .badge-danger { background: #fee2e2; color: #dc2626; }
-    .badge-warning { background: #fef3c7; color: #d97706; }
-    .badge-success { background: #d1fae5; color: #059669; }
-    .badge-info { background: #dbeafe; color: #2563eb; }
+    .badge-danger { background: #fee2e2; color: #b91c1c; }
+    .badge-warning { background: #fef3c7; color: #b45309; }
+    .badge-success { background: #d1fae5; color: #047857; }
+    .badge-info { background: #dbeafe; color: #1d4ed8; }
 
     .btn {
       padding: 8px 16px;
@@ -132,7 +135,7 @@
       box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
     .stat-card .number { font-size: 28px; font-weight: 700; color: #1a1a2e; }
-    .stat-card .label { font-size: 12px; color: #888; margin-top: 4px; }
+    .stat-card .label { font-size: 12px; color: #666; margin-top: 4px; }
 
     .modal-overlay {
       display: none;
@@ -230,7 +233,7 @@
     .product-pick-list td { padding: 6px 8px; }
     .product-pick-list input[type="number"] { width: 60px; padding: 4px 6px; margin: 0; }
 
-    .loading { text-align: center; padding: 40px; color: #888; }
+    .loading { text-align: center; padding: 40px; color: #666; }
     .error { color: #dc2626; padding: 12px; background: #fee2e2; border-radius: 6px; margin-bottom: 12px; }
     .hidden { display: none; }
 
@@ -301,14 +304,14 @@
         onmouseover="this.style.background='#3b5de7'"
         onmouseout="this.style.background='#4a6cf7'"
       >Start 7-Day Free Trial</button>
-      <p style="color:#666;font-size:12px;margin-top:12px;">
+      <p style="color:#a0a0b8;font-size:12px;margin-top:12px;">
         No credit card needed. Cancel anytime during trial.
       </p>
     </div>
   </div>
 
   <!-- Toast notifications -->
-  <div class="toast-container" id="toastContainer"></div>
+  <div class="toast-container" id="toastContainer" aria-live="polite"></div>
 
   <div id="appContent">
     <div class="header">
@@ -322,39 +325,39 @@
   </div>
 
   <div class="container">
-    <div class="tabs">
-      <button class="tab active" data-tab="low-stock">⚠ Low Stock</button>
-      <button class="tab" data-tab="products">📦 Products</button>
-      <button class="tab" data-tab="vendors">🏢 Vendors</button>
-      <button class="tab" data-tab="orders">📄 Purchase Orders</button>
+    <div class="tabs" role="tablist" aria-label="Dashboard sections">
+      <button class="tab active" data-tab="low-stock" role="tab" id="tab-btn-low-stock" aria-controls="tab-low-stock" aria-selected="true">⚠ Low Stock</button>
+      <button class="tab" data-tab="products" role="tab" id="tab-btn-products" aria-controls="tab-products" aria-selected="false">📦 Products</button>
+      <button class="tab" data-tab="vendors" role="tab" id="tab-btn-vendors" aria-controls="tab-vendors" aria-selected="false">🏢 Vendors</button>
+      <button class="tab" data-tab="orders" role="tab" id="tab-btn-orders" aria-controls="tab-orders" aria-selected="false">📄 Purchase Orders</button>
     </div>
 
-    <div class="loading" id="initialLoading" style="text-align:center;padding:60px 20px;color:#888;font-size:15px;">
+    <div class="loading" id="initialLoading" style="text-align:center;padding:60px 20px;color:#666;font-size:15px;">
       Loading your dashboard...
     </div>
 
     <div class="stats-row" id="statsRow"></div>
 
     <!-- Tab: Low Stock -->
-    <div id="tab-low-stock" class="tab-content"></div>
+    <div id="tab-low-stock" class="tab-content" role="tabpanel" aria-labelledby="tab-btn-low-stock"></div>
 
     <!-- Tab: Products -->
-    <div id="tab-products" class="tab-content hidden"></div>
+    <div id="tab-products" class="tab-content hidden" role="tabpanel" aria-labelledby="tab-btn-products"></div>
 
     <!-- Tab: Vendors -->
-    <div id="tab-vendors" class="tab-content hidden"></div>
+    <div id="tab-vendors" class="tab-content hidden" role="tabpanel" aria-labelledby="tab-btn-vendors"></div>
 
     <!-- Tab: Purchase Orders -->
-    <div id="tab-orders" class="tab-content hidden"></div>
+    <div id="tab-orders" class="tab-content hidden" role="tabpanel" aria-labelledby="tab-btn-orders"></div>
   </div>
 
   <!-- Modal -->
-  <div class="modal-overlay" id="modalOverlay">
+  <div class="modal-overlay" id="modalOverlay" role="dialog" aria-modal="true" aria-label="Dialog">
     <div class="modal" id="modalContent"></div>
   </div>
 
   <!-- Confirm Dialog -->
-  <div class="modal-overlay" id="confirmOverlay">
+  <div class="modal-overlay" id="confirmOverlay" role="dialog" aria-modal="true" aria-label="Confirmation">
     <div class="modal" style="max-width:400px;padding:24px;text-align:center">
       <p id="confirmMsg" style="font-size:15px;margin:0 0 20px 0"></p>
       <div class="btn-row" style="justify-content:center">
@@ -500,16 +503,34 @@
       // Update URL hash so reloads remember which tab was open
       window.location.hash = tabName;
       // Update UI
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach(t => {
+        t.classList.remove('active');
+        t.setAttribute('aria-selected', 'false');
+      });
       document.querySelectorAll('.tab-content').forEach(tc => tc.classList.add('hidden'));
       const tab = document.querySelector(`[data-tab="${tabName}"]`);
-      if (tab) tab.classList.add('active');
+      if (tab) {
+        tab.classList.add('active');
+        tab.setAttribute('aria-selected', 'true');
+      }
       document.getElementById(`tab-${tabName}`).classList.remove('hidden');
       loadTab(tabName);
     }
 
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+    });
+
+    // Arrow-key tab navigation (accessibility)
+    document.querySelector('.tabs').addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      const tabs = [...document.querySelectorAll('.tab')];
+      const idx = tabs.indexOf(document.activeElement);
+      if (idx === -1) return;
+      e.preventDefault();
+      const next = tabs[(idx + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+      next.focus();
+      switchTab(next.dataset.tab);
     });
 
     function loadTab(name) {
@@ -630,6 +651,7 @@
       const container = document.getElementById('toastContainer');
       const toast = document.createElement('div');
       toast.className = `toast toast-${type || 'info'}`;
+      toast.setAttribute('role', 'status');
       toast.textContent = message;
       container.appendChild(toast);
       setTimeout(() => {
@@ -759,8 +781,13 @@
     }
 
     async function editProduct(id) {
-      const data = await api(`/api/products?shop=${shop}`);
-      const vendors = await api(`/api/vendors?shop=${shop}`);
+      let data, vendors;
+      try {
+        data = await api(`/api/products?shop=${shop}`);
+        vendors = await api(`/api/vendors?shop=${shop}`);
+      } catch (e) {
+        return showToast('Failed to load product: ' + e.message, 'error');
+      }
       const p = data.find(x => x.id === id);
       if (!p) return;
 
@@ -779,7 +806,7 @@
           <button class="btn btn-primary" onclick="saveProduct(${id})">Save</button>
         </div>
       `;
-      document.getElementById('modalOverlay').classList.add('show');
+      showModalOverlay();
     }
 
     async function saveProduct(id) {
@@ -857,7 +884,7 @@
           <button class="btn btn-primary" onclick="saveVendor()">Save</button>
         </div>
       `;
-      document.getElementById('modalOverlay').classList.add('show');
+      showModalOverlay();
     }
 
     async function saveVendor() {
@@ -882,7 +909,12 @@
     }
 
     async function showEditVendor(id) {
-      const vendors = await api(`/api/vendors?shop=${shop}`);
+      let vendors;
+      try {
+        vendors = await api(`/api/vendors?shop=${shop}`);
+      } catch (e) {
+        return showToast('Failed to load vendors: ' + e.message, 'error');
+      }
       const v = vendors.find(x => x.id === id);
       if (!v) return;
 
@@ -901,7 +933,7 @@
           <button class="btn btn-primary" onclick="saveEditVendor()">Save</button>
         </div>
       `;
-      document.getElementById('modalOverlay').classList.add('show');
+      showModalOverlay();
     }
 
     async function saveEditVendor() {
@@ -994,8 +1026,13 @@
     // ─── Create PO ──────────────────────────────────────────────────
 
     async function createPOForProduct(productId) {
-      const products = await api(`/api/products?shop=${shop}`);
-      const vendors = await api(`/api/vendors?shop=${shop}`);
+      let products, vendors;
+      try {
+        products = await api(`/api/products?shop=${shop}`);
+        vendors = await api(`/api/vendors?shop=${shop}`);
+      } catch (e) {
+        return showToast('Failed to load products: ' + e.message, 'error');
+      }
       const p = products.find(x => x.id === productId);
 
       // No vendors yet — show a prompt to add one first
@@ -1010,7 +1047,7 @@
             <button class="btn btn-primary" onclick="closeModal();document.querySelector('[data-tab=vendors]').click()">Add Vendor</button>
           </div>
         `;
-        document.getElementById('modalOverlay').classList.add('show');
+        showModalOverlay();
         return;
       }
 
@@ -1035,7 +1072,7 @@
           <button class="btn btn-success" onclick="savePO(${p.id})">Create Draft PO</button>
         </div>
       `;
-      document.getElementById('modalOverlay').classList.add('show');
+      showModalOverlay();
     }
 
     async function savePO(productId) {
@@ -1072,8 +1109,13 @@
     // ─── Multi-Product PO ───────────────────────────────────────────
 
     async function showCreatePOMulti() {
-      const vendors = await api(`/api/vendors?shop=${shop}`);
-      const products = await api(`/api/products?shop=${shop}`);
+      let vendors, products;
+      try {
+        vendors = await api(`/api/vendors?shop=${shop}`);
+        products = await api(`/api/products?shop=${shop}`);
+      } catch (e) {
+        return showToast('Failed to load data: ' + e.message, 'error');
+      }
 
       if (vendors.length === 0) {
         return showToast('Add at least one vendor first.', 'error');
@@ -1094,7 +1136,7 @@
             <button class="btn btn-primary" onclick="closeModal();syncProducts()">⟳ Sync Products Now</button>
           </div>
         `;
-        document.getElementById('modalOverlay').classList.add('show');
+        showModalOverlay();
         return;
       }
 
@@ -1106,7 +1148,7 @@
         const suggested = p.reorder_point > 0 ? Math.max(p.reorder_point - p.current_stock, 0) : 0;
         const isLow = p.reorder_point > 0 && p.current_stock <= p.reorder_point;
         productRows += `<tr data-title="${esc(p.title).toLowerCase()}" data-sku="${esc(p.sku || '').toLowerCase()}">
-          <td>${isLow ? '<span class="badge badge-danger">low</span> ' : ''}<strong>${esc(p.title)}</strong><br><span style="color:#999;font-size:11px">${esc(p.sku || '-')}</span></td>
+          <td>${isLow ? '<span class="badge badge-danger">low</span> ' : ''}<strong>${esc(p.title)}</strong><br><span style="color:#666;font-size:11px">${esc(p.sku || '-')}</span></td>
           <td>${p.current_stock}</td>
           <td><input type="number" class="po-qty" id="poQty_${p.id}" value="${suggested}" min="0" style="width:60px"></td>
           <td><input type="number" class="po-cost" id="poCost_${p.id}" value="${p.unit_cost || ''}" step="0.01" min="0" style="width:70px"></td>
@@ -1134,7 +1176,7 @@
               <th style="width:22%">Cost ($)</th>
             </tr>
             ${productRows}
-            <tr id="poNoMatch" style="display:none"><td colspan="4" style="text-align:center;color:#888;padding:16px">No products match.</td></tr>
+            <tr id="poNoMatch" style="display:none"><td colspan="4" style="text-align:center;color:#666;padding:16px">No products match.</td></tr>
           </table>
         </div>
 
@@ -1147,7 +1189,7 @@
           <button class="btn btn-success" onclick="savePOMulti()">Create Purchase Order</button>
         </div>
       `;
-      document.getElementById('modalOverlay').classList.add('show');
+      showModalOverlay();
 
       // Live behaviors: total updates on qty/cost change; search filters rows
       modal.querySelectorAll('input[id^="poQty_"], input[id^="poCost_"]').forEach(input => {
@@ -1267,7 +1309,12 @@
     // ─── PO Actions (View / Send / Receive) ─────────────────────────
 
     async function viewPO(id) {
-      const po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
+      let po;
+      try {
+        po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
+      } catch (e) {
+        return showToast('Failed to load PO: ' + e.message, 'error');
+      }
       const modal = document.getElementById('modalContent');
       modal.className = 'modal modal-wide modal-flex';
 
@@ -1275,7 +1322,7 @@
       for (const item of po.line_items) {
         const lineTotal = item.ordered_qty * item.unit_cost;
         itemsHtml += `<tr>
-          <td><strong>${esc(item.title)}</strong><br><span style="color:#999;font-size:11px">${esc(item.sku || '-')}</span></td>
+          <td><strong>${esc(item.title)}</strong><br><span style="color:#666;font-size:11px">${esc(item.sku || '-')}</span></td>
           <td>${item.ordered_qty}</td>
           <td>$${Number(item.unit_cost).toFixed(2)}</td>
           <td>$${lineTotal.toFixed(2)}</td>
@@ -1304,7 +1351,7 @@
           <button class="btn btn-outline" onclick="closeModal()">Close</button>
         </div>
       `;
-      document.getElementById('modalOverlay').classList.add('show');
+      showModalOverlay();
     }
 
     const sendingPOs = new Set();
@@ -1343,7 +1390,12 @@
     }
 
     async function showReceivePO(id) {
-      const po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
+      let po;
+      try {
+        po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
+      } catch (e) {
+        return showToast('Failed to load PO: ' + e.message, 'error');
+      }
       const modal = document.getElementById('modalContent');
       modal.className = 'modal modal-wide modal-flex';
 
@@ -1351,7 +1403,7 @@
       for (const item of po.line_items) {
         const remaining = item.ordered_qty - (item.received_qty || 0);
         if (remaining <= 0) {
-          itemsHtml += `<tr style="color:#999">
+          itemsHtml += `<tr style="color:#666">
             <td><strong>${esc(item.title)}</strong></td>
             <td>${item.ordered_qty}</td>
             <td>${item.received_qty || 0}</td>
@@ -1359,7 +1411,7 @@
           </tr>`;
         } else {
           itemsHtml += `<tr>
-            <td><strong>${esc(item.title)}</strong><br><span style="color:#999;font-size:11px">Current stock: ${item.current_stock}</span></td>
+            <td><strong>${esc(item.title)}</strong><br><span style="color:#666;font-size:11px">Current stock: ${item.current_stock}</span></td>
             <td>${item.ordered_qty}</td>
             <td>${item.received_qty || 0}</td>
             <td><input type="number" id="recQty_${item.id}" value="${remaining}" min="0" max="${remaining}" style="width:70px"></td>
@@ -1370,7 +1422,7 @@
       modal.innerHTML = `
         <h2>Receive: ${esc(po.po_number)}</h2>
         <p style="color:#666;margin-bottom:12px">Vendor: <strong>${esc(po.vendor_name)}</strong></p>
-        <p style="font-size:13px;color:#888;margin-bottom:8px">Enter quantities received. Inventory will be updated in Shopify.</p>
+        <p style="font-size:13px;color:#666;margin-bottom:8px">Enter quantities received. Inventory will be updated in Shopify.</p>
         <div class="scroll-region">
         <table>
           <tr><th>Product</th><th>Ordered</th><th>Received</th><th>Now Receiving</th></tr>
@@ -1382,7 +1434,7 @@
           <button class="btn btn-success" onclick="saveReceivePO(${id})">Confirm Receipt</button>
         </div>
       `;
-      document.getElementById('modalOverlay').classList.add('show');
+      showModalOverlay();
     }
 
     async function saveReceivePO(id) {
@@ -1455,8 +1507,59 @@
 
     // ─── Modal ──────────────────────────────────────────────────────
 
+    // ─── Modal focus management (accessibility) ─────────────────────
+    // Keep the last focused element so focus returns when a modal closes,
+    // move focus INTO the modal when it opens, and trap Tab inside it —
+    // otherwise keyboard and screen-reader users lose their place.
+
+    let _lastFocused = null;
+
+    function showModalOverlay() {
+      const overlay = document.getElementById('modalOverlay');
+      overlay.classList.add('show');
+      _lastFocused = document.activeElement;
+      const title = overlay.querySelector('h2');
+      if (title) {
+        title.id = 'modalTitle';
+        overlay.setAttribute('aria-labelledby', 'modalTitle');
+      }
+      const first = overlay.querySelector('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+      if (first) first.focus();
+      else if (title) { title.setAttribute('tabindex', '-1'); title.focus(); }
+    }
+
+    function restoreFocus() {
+      if (_lastFocused && document.contains(_lastFocused)) _lastFocused.focus();
+      _lastFocused = null;
+    }
+
+    // Trap Tab inside whichever overlay is open
+    document.addEventListener('keydown', (e) => {
+      const overlay = document.getElementById('modalOverlay').classList.contains('show')
+        ? document.getElementById('modalOverlay')
+        : (document.getElementById('confirmOverlay').classList.contains('show') ? document.getElementById('confirmOverlay') : null);
+      if (!overlay || e.key !== 'Tab') return;
+      const focusables = overlay.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+
+    // Escape closes modals (accessibility)
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (document.getElementById('confirmOverlay').classList.contains('show')) {
+        confirmResponse(false);
+      } else if (document.getElementById('modalOverlay').classList.contains('show')) {
+        closeModal();
+      }
+    });
+
     function closeModal() {
       document.getElementById('modalOverlay').classList.remove('show');
+      restoreFocus();
     }
     document.getElementById('modalOverlay').addEventListener('click', (e) => {
       if (e.target === e.currentTarget) closeModal();
@@ -1472,14 +1575,17 @@
       document.getElementById('confirmOverlay').classList.remove('show');
       if (_confirmResolve) _confirmResolve(ok);
       _confirmResolve = null;
+      restoreFocus();
     };
 
     function showConfirm(msg, okLabel = 'OK') {
       return new Promise((resolve) => {
         _confirmResolve = resolve;
+        _lastFocused = document.activeElement;
         document.getElementById('confirmMsg').textContent = msg;
         document.getElementById('confirmOkBtn').textContent = okLabel;
         document.getElementById('confirmOverlay').classList.add('show');
+        document.getElementById('confirmOkBtn').focus();
       });
     }
 
