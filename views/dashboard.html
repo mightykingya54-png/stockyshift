@@ -168,6 +168,35 @@
     .modal .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
     .modal-wide { width: 700px; }
 
+    /* Sticky-footer modals: the item list scrolls internally while the
+       action buttons stay pinned at the bottom. Long lists (30+ products
+       in the multi-PO modal) previously pushed "Create Purchase Order"
+       below the fold with no hint to scroll. */
+    .modal-flex {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden; /* scroll region handles overflow instead */
+    }
+    .modal-flex .product-pick-list,
+    .modal-flex .scroll-region {
+      flex: 1 1 auto;
+      min-height: 180px;
+      max-height: none;
+      overflow-y: auto;
+      border: 1px solid #eee;
+      border-radius: 6px;
+      margin-bottom: 12px;
+    }
+    .modal-flex .product-pick-list th,
+    .modal-flex .scroll-region th {
+      position: sticky;
+      top: 0;
+      background: #fff;
+      z-index: 1;
+      border-bottom: 1px solid #eee;
+    }
+    .modal-flex .btn-row { flex-shrink: 0; }
+
     .product-pick-list {
       max-height: 300px;
       overflow-y: auto;
@@ -1018,7 +1047,7 @@
       }
 
       const modal = document.getElementById('modalContent');
-      modal.className = 'modal modal-wide';
+      modal.className = 'modal modal-wide modal-flex';
 
       let productRows = '';
       for (const p of products) {
@@ -1105,7 +1134,7 @@
     async function viewPO(id) {
       const po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
       const modal = document.getElementById('modalContent');
-      modal.className = 'modal modal-wide';
+      modal.className = 'modal modal-wide modal-flex';
 
       let itemsHtml = '';
       for (const item of po.line_items) {
@@ -1129,11 +1158,13 @@
           ${po.received_at ? `&middot; Received: ${new Date(po.received_at).toLocaleDateString()}` : ''}
         </p>
         ${po.notes ? `<p style="color:#666;font-size:13px;margin-bottom:12px">Notes: ${esc(po.notes)}</p>` : ''}
+        <div class="scroll-region">
         <table>
           <tr><th>Product</th><th>Qty</th><th>Unit Cost</th><th>Total</th><th>Received</th></tr>
           ${itemsHtml}
           <tr style="font-weight:700"><td colspan="3">TOTAL</td><td>$${Number(po.total).toFixed(2)}</td><td></td></tr>
         </table>
+        </div>
         <div class="btn-row">
           <button class="btn btn-outline" onclick="closeModal()">Close</button>
         </div>
@@ -1179,7 +1210,7 @@
     async function showReceivePO(id) {
       const po = await api(`/api/purchase-orders/${id}?shop=${shop}`);
       const modal = document.getElementById('modalContent');
-      modal.className = 'modal modal-wide';
+      modal.className = 'modal modal-wide modal-flex';
 
       let itemsHtml = '';
       for (const item of po.line_items) {
@@ -1205,10 +1236,12 @@
         <h2>Receive: ${esc(po.po_number)}</h2>
         <p style="color:#666;margin-bottom:12px">Vendor: <strong>${esc(po.vendor_name)}</strong></p>
         <p style="font-size:13px;color:#888;margin-bottom:8px">Enter quantities received. Inventory will be updated in Shopify.</p>
+        <div class="scroll-region">
         <table>
           <tr><th>Product</th><th>Ordered</th><th>Received</th><th>Now Receiving</th></tr>
           ${itemsHtml}
         </table>
+        </div>
         <div class="btn-row">
           <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
           <button class="btn btn-success" onclick="saveReceivePO(${id})">Confirm Receipt</button>
