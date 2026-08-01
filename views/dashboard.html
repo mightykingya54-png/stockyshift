@@ -423,7 +423,20 @@
 
     // ─── Billing check (runs before anything else) ──────────────────
 
-    async function checkBilling() {
+    // Show the trial/paywall overlay and hide the dashboard content.
+    function showBillingOverlay(declinedMsg) {
+      document.getElementById('appContent').classList.add('hidden');
+      const ol = document.getElementById('billingOverlay');
+      ol.style.display = 'flex';
+      ol.classList.remove('hidden');
+      const declinedEl = document.getElementById('billingDeclined');
+      if (declinedMsg) {
+        declinedEl.textContent = declinedMsg;
+        declinedEl.classList.remove('hidden');
+      }
+    }
+
+    async function checkBilling(retries = 2) {
       if (!shop) return true;
       try {
         const billing = await api(`/api/billing/status?shop=${shop}`);
@@ -435,26 +448,18 @@
             billing.status === 'declined' || billing.status === 'frozen' ||
             (billing.status === 'trial' && billing.trial_days_left <= 0)) {
           // Show billing overlay
-          document.getElementById('appContent').classList.add('hidden');
-          const ol = document.getElementById('billingOverlay');
-          ol.style.display = 'flex';
-          ol.classList.remove('hidden');
-          // Update button for expired trial
           if (billing.status === 'trial' && billing.trial_days_left <= 0) {
             document.getElementById('startTrialBtn').textContent = 'Resubscribe — $29/month';
           }
           // Show declined/frozen message: either from the URL (just declined
-          // on the billing page) or from the webhook-set status. 'declined'
-          // and 'frozen' previously fell through here and left the merchant
-          // with a fully broken dashboard (every API call 402s).
-          const declinedEl = document.getElementById('billingDeclined');
+          // on the billing page) or from the webhook-set status.
+          let declinedMsg = null;
           if (urlParams.get('billing') === 'declined' || billing.status === 'declined') {
-            declinedEl.textContent = 'Billing was cancelled. Start a trial to continue using StockyShift.';
-            declinedEl.classList.remove('hidden');
+            declinedMsg = 'Billing was cancelled. Start a trial to continue using StockyShift.';
           } else if (billing.status === 'frozen') {
-            declinedEl.textContent = 'Your subscription is on hold due to a payment issue. Resubscribe to continue using StockyShift.';
-            declinedEl.classList.remove('hidden');
+            declinedMsg = 'Your subscription is on hold due to a payment issue. Resubscribe to continue using StockyShift.';
           }
+          showBillingOverlay(declinedMsg);
           return false;
         }
 
@@ -468,7 +473,22 @@
         return true;
       } catch (e) {
         console.error('Billing check failed:', e);
-        return true; // allow app to load even if billing check fails
+        if (retries > 0) {
+          // The first call can race App Bridge init: the CDN import + token
+          // prime can exceed the 3s cap in api(), leaving us with NO Bearer
+          // token while third-party-cookie blocking kills the cookie fallback
+          // in the embedded iframe. Wait for init to settle, then retry —
+          // otherwise a brand-new install lands on a dashboard that 402s
+          // every call with the trial overlay never shown.
+          await new Promise(r => setTimeout(r, 1500));
+          return checkBilling(retries - 1);
+        }
+        // Last resort: never leave a merchant on a silently dead dashboard.
+        // A fresh install is always in pending-trial state, so the overlay is
+        // the right call — if auth is genuinely broken the trial click fails
+        // with a visible error instead of a blank paywall.
+        showBillingOverlay();
+        return false;
       }
     }
 
@@ -625,6 +645,18 @@
         }
         throw new Error('Session expired');
       }
+      // Server says billing is required — this is DEFINITIVE (the billing
+      // middleware only 402s after auth passed). Flip to the billing overlay
+      // immediately: this catches the case where checkBilling's first attempt
+      // raced App Bridge init and failed, which would otherwise leave the
+      // merchant on a dashboard that 402s every call with no trial CTA.
+      if (res.status === 402) {
+        showBillingOverlay();
+        let detail = 'Billing required';
+        try { const body = await res.json(); detail = body.error || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+
       if (!res.ok) {
         let detail = `HTTP ${res.status}`;
         try { const body = await res.json(); detail = String(body.stack || body.detail || body.error || body.message || detail); } catch (_) {}
