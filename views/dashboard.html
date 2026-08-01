@@ -197,60 +197,23 @@
     }
     .modal-flex .btn-row { flex-shrink: 0; }
 
-    /* Multi-PO create modal polish: vendor row, search toolbar, live summary */
+    /* Multi-PO create modal — minimal */
     .po-vendor-row {
       display: flex;
       align-items: center;
       gap: 12px;
-      margin-bottom: 12px;
+      margin-bottom: 10px;
     }
     .po-vendor-row label { white-space: nowrap; font-size: 13px; font-weight: 600; color: #444; }
     .po-vendor-row select { flex: 1; margin: 0; }
 
-    .po-toolbar {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 10px;
-    }
-    .po-toolbar input[type="search"] {
-      flex: 1;
-      min-width: 0;
-      width: auto;
-      margin: 0;
+    .po-search {
+      margin-bottom: 10px !important;
       padding: 7px 12px;
-      border-radius: 6px;
     }
-    .po-low-toggle {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      font-size: 12px;
-      color: #555;
-      white-space: nowrap;
-      margin: 0;
-      cursor: pointer;
-    }
-    .po-low-toggle input { width: auto; margin: 0; }
-    .po-count { font-size: 12px; color: #888; white-space: nowrap; }
 
-    .po-summary {
-      display: flex;
-      justify-content: flex-end;
-      gap: 18px;
-      padding: 8px 12px;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-      border-radius: 6px;
-      margin-bottom: 12px;
-      font-size: 13px;
-      color: #475569;
-    }
-    .po-summary span:last-child {
-      font-weight: 700;
-      font-size: 15px;
-      color: #16a34a;
-    }
+    .po-footer { justify-content: flex-start; }
+    .po-total { font-size: 13px; color: #475569; padding-right: 12px; white-space: nowrap; }
 
     .product-pick-list tr:hover { background: #fafafa; }
     .product-pick-list tr.po-row-selected { background: #f0fdf4; }
@@ -1112,18 +1075,16 @@
       for (const p of products) {
         const suggested = p.reorder_point > 0 ? Math.max(p.reorder_point - p.current_stock, 0) : 0;
         const isLow = p.reorder_point > 0 && p.current_stock <= p.reorder_point;
-        productRows += `<tr data-title="${esc(p.title).toLowerCase()}" data-sku="${esc(p.sku || '').toLowerCase()}" data-low="${isLow ? '1' : '0'}">
-          <td><strong>${esc(p.title)}</strong><br><span style="color:#999;font-size:11px">${esc(p.sku || '-')}</span></td>
-          <td>${isLow ? `<span class="badge badge-danger">${p.current_stock}</span>` : p.current_stock}</td>
-          <td>${p.reorder_point || '-'}</td>
+        productRows += `<tr data-title="${esc(p.title).toLowerCase()}" data-sku="${esc(p.sku || '').toLowerCase()}">
+          <td>${isLow ? '<span class="badge badge-danger">low</span> ' : ''}<strong>${esc(p.title)}</strong><br><span style="color:#999;font-size:11px">${esc(p.sku || '-')}</span></td>
+          <td>${p.current_stock}</td>
           <td><input type="number" class="po-qty" id="poQty_${p.id}" value="${suggested}" min="0" style="width:60px"></td>
           <td><input type="number" class="po-cost" id="poCost_${p.id}" value="${p.unit_cost || ''}" step="0.01" min="0" style="width:70px"></td>
         </tr>`;
       }
 
       modal.innerHTML = `
-        <h2 style="margin-bottom:4px">Create Purchase Order</h2>
-        <p style="color:#888;font-size:13px;margin:0 0 14px">Pick a vendor and enter quantities — the total updates live as you type.</p>
+        <h2 style="margin-bottom:14px">Create Purchase Order</h2>
 
         <div class="po-vendor-row">
           <label for="poMultiVendor" style="margin:0">Vendor</label>
@@ -1132,45 +1093,33 @@
           </select>
         </div>
 
-        <div class="po-toolbar">
-          <input type="search" id="poSearch" placeholder="Search products or SKU…">
-          <label class="po-low-toggle">
-            <input type="checkbox" id="poLowOnly"> Only below reorder point
-          </label>
-          <span class="po-count" id="poCount">${products.length} products</span>
-        </div>
+        <input type="search" id="poSearch" class="po-search" placeholder="Search products or SKU…">
 
         <div class="product-pick-list">
           <table id="poTable">
             <tr>
-              <th style="width:40%">Product</th>
+              <th style="width:44%">Product</th>
               <th style="width:12%">Stock</th>
-              <th style="width:12%">Reorder</th>
-              <th style="width:18%">Qty</th>
-              <th style="width:18%">Cost ($)</th>
+              <th style="width:22%">Qty</th>
+              <th style="width:22%">Cost ($)</th>
             </tr>
             ${productRows}
-            <tr id="poNoMatch" style="display:none"><td colspan="5" style="text-align:center;color:#888;padding:16px">No products match your filters.</td></tr>
+            <tr id="poNoMatch" style="display:none"><td colspan="4" style="text-align:center;color:#888;padding:16px">No products match.</td></tr>
           </table>
         </div>
 
-        <div class="po-summary">
-          <span id="poSummaryItems">0 items</span>
-          <span id="poSummaryQty">0 units</span>
-          <span id="poSummaryTotal">$0.00</span>
-        </div>
+        <textarea id="poMultiNotes" rows="2" placeholder="Notes (optional)"></textarea>
 
-        <label>Notes (optional)</label>
-        <textarea id="poMultiNotes" rows="2"></textarea>
-        <div class="btn-row">
+        <div class="btn-row po-footer">
+          <span class="po-total" id="poTotal">Total: $0.00</span>
+          <span style="flex:1"></span>
           <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
           <button class="btn btn-success" onclick="savePOMulti()">Create Purchase Order</button>
         </div>
       `;
       document.getElementById('modalOverlay').classList.add('show');
 
-      // Live behaviors: summary + row highlight on qty/cost change,
-      // search + low-stock filtering
+      // Live behaviors: total updates on qty/cost change; search filters rows
       modal.querySelectorAll('input[id^="poQty_"], input[id^="poCost_"]').forEach(input => {
         input.addEventListener('input', () => {
           const tr = input.closest('tr');
@@ -1180,11 +1129,10 @@
         });
       });
       modal.querySelector('#poSearch').addEventListener('input', filterPOMulti);
-      modal.querySelector('#poLowOnly').addEventListener('change', filterPOMulti);
       updatePOMultiSummary();
     }
 
-    // Live summary for the multi-PO modal — updates as quantities change
+    // Live total for the multi-PO modal — updates as quantities change
     function updatePOMultiSummary() {
       let items = 0, units = 0, total = 0;
       document.querySelectorAll('#poTable tr[data-title]').forEach(tr => {
@@ -1196,27 +1144,25 @@
           total += qty * cost;
         }
       });
-      const itemsEl = document.getElementById('poSummaryItems');
-      if (!itemsEl) return;
-      document.getElementById('poSummaryItems').textContent = `${items} item${items === 1 ? '' : 's'}`;
-      document.getElementById('poSummaryQty').textContent = `${units} unit${units === 1 ? '' : 's'}`;
-      document.getElementById('poSummaryTotal').textContent = '$' + total.toFixed(2);
+      const el = document.getElementById('poTotal');
+      if (!el) return;
+      if (items === 0) {
+        el.textContent = 'Total: $0.00';
+      } else {
+        el.textContent = `${items} item${items === 1 ? '' : 's'} · ${units} unit${units === 1 ? '' : 's'} · $${total.toFixed(2)}`;
+      }
     }
 
-    // Search + "only below reorder point" filtering for the multi-PO modal
+    // Search filtering for the multi-PO modal
     function filterPOMulti() {
       const q = (document.getElementById('poSearch').value || '').toLowerCase().trim();
-      const lowOnly = document.getElementById('poLowOnly').checked;
       let visible = 0;
       document.querySelectorAll('#poTable tr[data-title]').forEach(tr => {
-        const matchQ = !q || tr.dataset.title.includes(q) || tr.dataset.sku.includes(q);
-        const matchL = !lowOnly || tr.dataset.low === '1';
-        const show = matchQ && matchL;
+        const show = !q || tr.dataset.title.includes(q) || tr.dataset.sku.includes(q);
         tr.style.display = show ? '' : 'none';
         if (show) visible++;
       });
       document.getElementById('poNoMatch').style.display = visible === 0 ? '' : 'none';
-      document.getElementById('poCount').textContent = `${visible} of ${document.querySelectorAll('#poTable tr[data-title]').length} products`;
     }
 
     async function savePOMulti() {
