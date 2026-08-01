@@ -101,6 +101,16 @@ app.use(session({
   },
 }));
 
+// Malformed JSON bodies → 400, not 500. body-parser's parse errors (SyntaxError
+// with entity.parse.failed) would otherwise fall through to the global error
+// handler and return "Internal server error" for a client-side mistake.
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Invalid JSON in request body' });
+  }
+  next(err);
+});
+
 // ─── Shopify HMAC / Session Token Verification ────────────────────────────
 
 function verifyWebhook(body, hmacHeader) {

@@ -14,11 +14,11 @@
   input:focus{outline:none;border-color:#4a6cf7}
   button{width:100%;padding:12px;background:#1a1a2e;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
   button:hover{background:#2a2a4e}
-  .hint{color:#999;font-size:13px;margin-top:8px}
+  .hint{color:#666;font-size:13px;margin-top:8px}
   .spinner{margin:20px auto;width:32px;height:32px;border:3px solid #e0e0e0;border-top-color:#1a1a2e;border-radius:50%;animation:spin .8s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
-  .error-msg{color:#dc2626;background:#fee2e2;border-radius:8px;padding:12px;font-size:13px;margin-bottom:16px}
-  .btn-link{background:none;border:none;color:#4a6cf7;text-decoration:underline;cursor:pointer;padding:0;font:inherit}
+  .error-msg{color:#b91c1c;background:#fee2e2;border-radius:8px;padding:12px;font-size:13px;margin-bottom:16px}
+  .btn-link{background:none;border:none;color:#3b5de7;text-decoration:underline;cursor:pointer;padding:0;font:inherit}
   #standalone{display:block}
   #embedded{display:none}
 </style>
@@ -27,14 +27,14 @@
 <div class="card" id="standalone">
   <h1>StockyShift</h1>
   <p>Purchase orders &amp; low stock alerts for your Shopify store.</p>
-  <p style="font-size:13px;color:#888;margin:-16px 0 20px 0">
+  <p style="font-size:13px;color:#666;margin:-16px 0 20px 0">
     <strong>$29/month</strong> — 7-day free trial, no credit card needed
   </p>
   <input type="text" id="shopInput" placeholder="your-store.myshopify.com" autofocus onkeydown="if(event.key==='Enter')install()">
   <div id="inputError" class="error-msg" style="display:none;margin-bottom:12px"></div>
   <button type="button" onclick="install()">Install on your store</button>
   <p class="hint">Enter your Shopify store name above</p>
-  <p style="margin-top:24px;font-size:12px;color:#888">
+  <p style="margin-top:24px;font-size:12px;color:#666">
     <a href="/privacy" style="color:#666;text-decoration:underline">Privacy Policy</a>
     &nbsp;·&nbsp;
     <a href="/terms" style="color:#666;text-decoration:underline">Terms of Service</a>
