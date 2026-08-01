@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background: brand navy, rounded square (Shopify icon-safe) -->
+  <rect width="512" height="512" rx="112" fill="#1a1a2e"/>
+
+  <!-- Shipping box (isometric) -->
+  <!-- Top face -->
+  <path d="M256 96 L392 164 L256 232 L120 164 Z" fill="#4a6cf7"/>
+  <!-- Left face -->
+  <path d="M120 164 L120 332 L256 400 L256 232 Z" fill="#2d4fd8"/>
+  <!-- Right face -->
+  <path d="M392 164 L392 332 L256 400 L256 232 Z" fill="#2440b5"/>
+  <!-- Box flap line on top face -->
+  <path d="M256 96 L256 232" stroke="#1a1a2e" stroke-width="6" opacity="0.25" fill="none"/>
+
+  <!-- Upward restock arrow (white) -->
+  <g stroke="#ffffff" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M256 352 L256 248"/>
+    <path d="M216 288 L256 248 L296 288"/>
+  </g>
+
+  <!-- Checkmark accent in top-right -->
+  <circle cx="392" cy="104" r="36" fill="#059669"/>
+  <path d="M374 104 L386 116 L410 90" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
