@@ -1071,11 +1071,6 @@
       const modal = document.getElementById('modalContent');
       modal.className = 'modal modal-wide modal-flex';
 
-      // If no product in the store has a cost, hide the Cost column entirely
-      // (the footer then shows items/units only). It reappears automatically
-      // when the merchant starts tracking costs in Shopify.
-      const hasCosts = products.some(p => p.unit_cost > 0);
-
       let productRows = '';
       for (const p of products) {
         const suggested = p.reorder_point > 0 ? Math.max(p.reorder_point - p.current_stock, 0) : 0;
@@ -1084,7 +1079,7 @@
           <td>${isLow ? '<span class="badge badge-danger">low</span> ' : ''}<strong>${esc(p.title)}</strong><br><span style="color:#999;font-size:11px">${esc(p.sku || '-')}</span></td>
           <td>${p.current_stock}</td>
           <td><input type="number" class="po-qty" id="poQty_${p.id}" value="${suggested}" min="0" style="width:60px"></td>
-          ${hasCosts ? `<td><input type="number" class="po-cost" id="poCost_${p.id}" value="${p.unit_cost || ''}" step="0.01" min="0" style="width:70px"></td>` : ''}
+          <td><input type="number" class="po-cost" id="poCost_${p.id}" value="${p.unit_cost || ''}" step="0.01" min="0" style="width:70px"></td>
         </tr>`;
       }
 
@@ -1106,10 +1101,10 @@
               <th style="width:44%">Product</th>
               <th style="width:12%">Stock</th>
               <th style="width:22%">Qty</th>
-              ${hasCosts ? '<th style="width:22%">Cost ($)</th>' : ''}
+              <th style="width:22%">Cost ($)</th>
             </tr>
             ${productRows}
-            <tr id="poNoMatch" style="display:none"><td colspan="${hasCosts ? 4 : 3}" style="text-align:center;color:#888;padding:16px">No products match.</td></tr>
+            <tr id="poNoMatch" style="display:none"><td colspan="4" style="text-align:center;color:#888;padding:16px">No products match.</td></tr>
           </table>
         </div>
 
@@ -1138,9 +1133,9 @@
     }
 
     // Live total for the multi-PO modal — updates as quantities change.
-    // If the Cost column is hidden (no product in the store has a cost),
-    // show only item/unit counts. If the column exists but no costs are
-    // entered, say "no costs entered" instead of a misleading $0.00.
+    // If quantities exist but no costs are entered (Shopify doesn't track
+    // unit costs for most stores, so the cost field defaults blank), show
+    // "no costs entered" instead of a misleading $0.00.
     function updatePOMultiSummary() {
       let items = 0, units = 0, total = 0;
       document.querySelectorAll('#poTable tr[data-title]').forEach(tr => {
@@ -1154,15 +1149,12 @@
       });
       const el = document.getElementById('poTotal');
       if (!el) return;
-      const hasCost = document.querySelectorAll('#poTable .po-cost').length > 0;
       if (items === 0) {
-        el.textContent = hasCost ? 'Total: $0.00' : 'No items selected';
+        el.textContent = 'Total: $0.00';
         return;
       }
       const base = `${items} item${items === 1 ? '' : 's'} · ${units} unit${units === 1 ? '' : 's'}`;
-      if (!hasCost) {
-        el.textContent = base;
-      } else if (total > 0) {
+      if (total > 0) {
         el.textContent = `${base} · $${total.toFixed(2)}`;
       } else {
         el.textContent = `${base} · no costs entered`;
