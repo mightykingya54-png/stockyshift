@@ -1236,10 +1236,18 @@
       }
       const base = `${items} item${items === 1 ? '' : 's'} · ${units} unit${units === 1 ? '' : 's'}`;
       if (anyCost) {
-        const suffix = costNoQty === 1
-          ? ' — 1 item has a cost but no quantity'
-          : ` — ${costNoQty} items have costs but no quantities`;
-        el.textContent = `${base} · $${total.toFixed(2)}${suffix}`;
+        // Only explain cost-without-quantity when it actually exists.
+        // With all costs on rows that have quantities the total already
+        // includes them — a "0 items have costs but no quantities" suffix
+        // would just be noise.
+        if (costNoQty > 0) {
+          const suffix = costNoQty === 1
+            ? ' — 1 item has a cost but no quantity'
+            : ` — ${costNoQty} items have costs but no quantities`;
+          el.textContent = `${base} · $${total.toFixed(2)}${suffix}`;
+        } else {
+          el.textContent = `${base} · $${total.toFixed(2)}`;
+        }
       } else {
         el.textContent = `${base} · no costs entered`;
       }
