@@ -1052,20 +1052,32 @@ app.delete('/api/vendors/:id', async (req, res) => {
   // so a PO created in another tab between the check and the delete cannot
   // leave a dangling vendor reference (TOCTOU). Native better-sqlite3
   // transaction: no awaits inside, nothing can interleave.
-  const del = db.transaction((tx) => {
+  // NOTE: db.transaction returns a Promise (db.js wraps the synchronous
+  // better-sqlite3 transaction in Promise.resolve). We MUST await it — the
+  // previous code read `del.blocked` from the un-awaited Promise, which is
+  // always undefined, so the blocked check was bypassed and the server
+  // returned {success:true} even when 0 rows were deleted (because the
+  // transaction had short-circuited on the blocked path).
+  const del = await db.transaction((tx) => {
     const poCount = tx.get('SELECT COUNT(*) AS count FROM purchase_orders WHERE vendor_id = $1 AND shop = $2', [id, shop]);
     if (poCount.count > 0) return { blocked: true, count: poCount.count };
 
     // Unset as preferred vendor on products (scoped to shop)
     tx.run('UPDATE products SET preferred_vendor_id = NULL WHERE preferred_vendor_id = $1 AND shop = $2', [id, shop]);
-    // Delete vendor
-    tx.run('DELETE FROM vendors WHERE id = $1 AND shop = $2', [id, shop]);
-    return { blocked: false };
+    // Delete vendor — capture changes so we can detect "0 rows deleted"
+    // (e.g., vendor id belongs to another shop — shouldn't happen because
+    // shop is from req.shop, but defensive)
+    const delInfo = tx.run('DELETE FROM vendors WHERE id = $1 AND shop = $2', [id, shop]);
+    return { blocked: false, deleted: delInfo.changes };
   });
   if (del.blocked) {
     return res.status(400).json({
       error: `Cannot delete: vendor has ${del.count} existing purchase order(s). Delete the POs first.`
     });
+  }
+  if (!del.deleted) {
+    // Transaction ran but no row matched (id+shop combo not in vendors table)
+    return res.status(404).json({ error: 'Vendor not found for this shop' });
   }
 
   res.json({ success: true });
