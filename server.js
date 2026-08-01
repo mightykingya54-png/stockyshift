@@ -1679,7 +1679,7 @@ app.get('/api/billing/status', async (req, res) => {
   const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1', [shop]);
   if (!merchant) return res.json({ status: 'not_installed' });
 
-  if (process.env.SKIP_BILLING === 'true') {
+  if (process.env.NODE_ENV !== 'production' && process.env.SKIP_BILLING === 'true') {
     return res.json({ status: 'active', plan: BILLING_PLAN.name, skip_billing: true });
   }
 
@@ -2076,6 +2076,35 @@ cron.schedule('45 7 * * *', async () => {
     }
   } catch (err) {
     console.error('[Cron] Auto-sync error:', err.message);
+  }
+});
+
+// ─── Cron Job: GDPR 48h Purge Sweep ──────────────────────────────────────
+
+// Belt-and-braces on top of Shopify's shop/redact webhook (which fires ~48h
+// after uninstall): hard-delete any merchant soft-deactivated more than 48h
+// ago whose data survived — e.g. if a redact webhook delivery permanently
+// failed. Matches the privacy policy's "48 hours" retention promise.
+// Mirrors the shop/redact deletion order (FK children first).
+cron.schedule('30 4 * * *', async () => {
+  console.log('[Cron] Running GDPR 48h purge sweep...');
+  try {
+    const stale = await db.all(`
+      SELECT shop FROM merchants
+      WHERE is_active = 0 AND uninstalled_at IS NOT NULL
+        AND uninstalled_at < datetime('now', '-48 hours')
+    `);
+    for (const { shop } of stale) {
+      await db.run('DELETE FROM po_line_items WHERE po_id IN (SELECT id FROM purchase_orders WHERE shop = $1)', [shop]);
+      await db.run('DELETE FROM purchase_orders WHERE shop = $1', [shop]);
+      await db.run('DELETE FROM products WHERE shop = $1', [shop]);
+      await db.run('DELETE FROM vendors WHERE shop = $1', [shop]);
+      await db.run('DELETE FROM oauth_states WHERE shop = $1', [shop]);
+      await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
+      console.log(`[GDPR] Sweep: purged ${shop} (uninstalled > 48h)`);
+    }
+  } catch (err) {
+    console.error('[GDPR] Sweep error:', err.message);
   }
 });
 
