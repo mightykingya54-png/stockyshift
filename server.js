@@ -55,6 +55,10 @@ const API_VERSION = '2026-07';
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // HSTS: production only — on localhost over http it would brick the browser
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
   // Embedded apps MUST be frameable by Shopify admin
   // Use CSP frame-ancestors (modern) instead of X-Frame-Options (deprecated for this use case)
   const shop = (req.query.shop || '').trim();
@@ -337,7 +341,8 @@ app.get('/auth/callback', async (req, res) => {
         client_secret: SHOPIFY_API_SECRET,
         code,
         expiring: 1,
-      }
+      },
+      { timeout: 15000 } // don't hang the install screen on a slow network
     );
 
     const tokenData = tokenResponse.data;
@@ -599,7 +604,7 @@ async function refreshShopifyToken(shop, oldRefreshToken) {
   const response = await axios.post(
     `https://${shop}/admin/oauth/access_token`,
     params.toString(),
-    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
   );
   const { access_token, expires_in, refresh_token: newRefreshToken } = response.data;
   const expires_at = expires_in
@@ -1091,12 +1096,32 @@ app.post('/api/purchase-orders', async (req, res) => {
 });
 
 // Send PO email
+// Per-shop throttle for PO emails: a scripted merchant (or a double-click
+// storm) could otherwise blast the SMTP provider — burning Resend quota,
+// spamming vendor inboxes, and damaging the sending domain's reputation.
+// One send per 6s per shop (10/min) is generous for real usage.
+const sendThrottle = new Map();
+
 app.post('/api/purchase-orders/:id/send', async (req, res) => {
   const { id } = req.params;
   const shop = requireShop(req, res);
   if (!shop) return;
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid PO ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
+
+  const sendNow = Date.now();
+  const lastSend = sendThrottle.get(shop) || 0;
+  if (sendNow - lastSend < 6000) {
+    const waitSec = Math.ceil((6000 - (sendNow - lastSend)) / 1000);
+    return res.status(429).json({ error: `Please wait ${waitSec}s between sends.` });
+  }
+  sendThrottle.set(shop, sendNow);
+  // Sweep stale entries so the map can't grow unbounded
+  if (sendThrottle.size > 1000) {
+    for (const [s, t] of sendThrottle) {
+      if (sendNow - t > 600000) sendThrottle.delete(s);
+    }
+  }
 
   const po = await db.get(`
     SELECT po.*, v.name as vendor_name, v.email as vendor_email
@@ -1106,6 +1131,12 @@ app.post('/api/purchase-orders/:id/send', async (req, res) => {
   `, [id, shop]);
 
   if (!po) return res.status(404).json({ error: 'PO not found' });
+
+  // UI only shows Send for drafts, but the API must enforce it too —
+  // re-sending a fully received PO would email the vendor a stale order.
+  if (po.status === 'received') {
+    return res.status(400).json({ error: 'This purchase order has already been received and cannot be re-sent.' });
+  }
 
   // Use denormalized product_title/product_sku (stored at PO creation time)
   // so POs are not broken if the product is later deleted. Fall back to JOIN
@@ -2209,6 +2240,7 @@ app.post('/webhooks/gdpr/shop/redact', async (req, res) => {
   await db.run('DELETE FROM purchase_orders WHERE shop = $1', [shop]);
   await db.run('DELETE FROM products WHERE shop = $1', [shop]);
   await db.run('DELETE FROM vendors WHERE shop = $1', [shop]);
+  await db.run('DELETE FROM oauth_states WHERE shop = $1', [shop]);
   await db.run('DELETE FROM merchants WHERE shop = $1', [shop]);
   console.log(`[GDPR] shop/redact — all data deleted for ${shop}`);
   res.status(200).send('OK');

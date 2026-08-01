@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "c6f8088fe21f2043fc863899e6c7ae66"
-name = "StockyShift "
+name = "StockyShift"
 application_url = "https://stockyshift.com"
 embedded = true
 

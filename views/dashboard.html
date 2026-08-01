@@ -537,9 +537,12 @@
         const headers = { 'Content-Type': 'application/json' };
         if (token) headers['Authorization'] = `Bearer ${token}`;
         if (opts.headers) Object.assign(headers, opts.headers);
-        // Destructure opts to prevent headers collision (opts.headers merged above)
-        const { headers: _ignored, ...optsWithoutHeaders } = opts;
-        return fetch(path, { headers, ...optsWithoutHeaders });
+        // Destructure opts to prevent headers collision (opts.headers merged
+        // above) and pull out our custom timeout (default 60s — long syncs
+        // pass a larger one). Without a timeout, a slow connection hangs the
+        // UI forever with no feedback.
+        const { headers: _ignored, timeout: _timeout, ...optsWithoutHeaders } = opts;
+        return fetch(path, { headers, ...optsWithoutHeaders, signal: AbortSignal.timeout(_timeout || 60000) });
       };
 
       let res = await doFetch();
@@ -1391,6 +1394,7 @@
         const result = await api('/api/sync-products', {
           method: 'POST',
           body: JSON.stringify({ shop }),
+          timeout: 300000, // big catalogs: up to 50 pages of GraphQL server-side
         });
         loadProducts();
         loadLowStock();
