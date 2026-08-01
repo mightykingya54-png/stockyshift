@@ -433,6 +433,9 @@ app.get('/', async (req, res, next) => {
       if (req.headers.cookie?.includes('connect.sid') && req.session?.shop) {
         return res.redirect(`/?shop=${encodeURIComponent(req.session.shop)}`);
       }
+      // Landing page is static and shared — let browsers cache it for 5 min
+      // so repeat visits don't round-trip (helps hide Render free-tier cold starts)
+      res.set('Cache-Control', 'public, max-age=300');
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
@@ -488,6 +491,9 @@ app.get('/apps/stockyshift', async (req, res, next) => {
       if (req.headers.cookie?.includes('connect.sid') && req.session?.shop) {
         return res.redirect(`/?shop=${encodeURIComponent(req.session.shop)}`);
       }
+      // Landing page is static and shared — let browsers cache it for 5 min
+      // so repeat visits don't round-trip (helps hide Render free-tier cold starts)
+      res.set('Cache-Control', 'public, max-age=300');
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
@@ -501,6 +507,9 @@ app.get('/apps/stockyshift', async (req, res, next) => {
 
     if (!merchant) {
       // Not authenticated — serve landing page, JS will redirect to auth
+      // Landing page is static and shared — let browsers cache it for 5 min
+      // so repeat visits don't round-trip (helps hide Render free-tier cold starts)
+      res.set('Cache-Control', 'public, max-age=300');
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
@@ -509,6 +518,9 @@ app.get('/apps/stockyshift', async (req, res, next) => {
     if (!merchant.refresh_token) {
       console.log(`[Auth] ${shop} (via proxy) has non-expiring token, forcing re-auth`);
       await db.run('UPDATE merchants SET is_active = 0, access_token = \'\' WHERE shop = $1', [shop]);
+      // Landing page is static and shared — let browsers cache it for 5 min
+      // so repeat visits don't round-trip (helps hide Render free-tier cold starts)
+      res.set('Cache-Control', 'public, max-age=300');
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
