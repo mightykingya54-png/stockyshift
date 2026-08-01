@@ -441,7 +441,7 @@ app.get('/', async (req, res, next) => {
     // anyone knowing a shop domain could GET /?shop=victim&reauth=1 and null
     // the victim's token (forced re-auth DoS).
     if (reauth === '1' && req.session?.shop === shop) {
-      await db.run('UPDATE merchants SET is_active = 0, access_token = NULL WHERE shop = $1', [shop]);
+      await db.run('UPDATE merchants SET is_active = 0, access_token = \'\' WHERE shop = $1', [shop]);
       return res.redirect(`/auth?shop=${shop}`);
     }
 
@@ -455,7 +455,7 @@ app.get('/', async (req, res, next) => {
     // Soft-deactivate instead of DELETE so FK-linked data (vendors, POs, products) survives re-install.
     if (!merchant.refresh_token) {
       console.log(`[Auth] ${shop} has non-expiring token, forcing re-auth for API 2026-07 compatibility`);
-      await db.run('UPDATE merchants SET is_active = 0, access_token = NULL WHERE shop = $1', [shop]);
+      await db.run('UPDATE merchants SET is_active = 0, access_token = \'\' WHERE shop = $1', [shop]);
       return res.redirect(`/auth?shop=${shop}`);
     }
 
@@ -508,7 +508,7 @@ app.get('/apps/stockyshift', async (req, res, next) => {
     // Soft-deactivate instead of DELETE so FK-linked data (vendors, POs, products) survives re-install.
     if (!merchant.refresh_token) {
       console.log(`[Auth] ${shop} (via proxy) has non-expiring token, forcing re-auth`);
-      await db.run('UPDATE merchants SET is_active = 0, access_token = NULL WHERE shop = $1', [shop]);
+      await db.run('UPDATE merchants SET is_active = 0, access_token = \'\' WHERE shop = $1', [shop]);
       return res.sendFile(path.join(__dirname, 'views', 'landing.html'));
     }
 
@@ -556,13 +556,22 @@ function isShopifyAuthError(err) {
 // reinstall via /auth restores everything). Mirrors the uninstall webhook —
 // covers cases where that webhook never fired (not registered, or Shopify
 // revoked the token without delivering it).
+// MUST NEVER THROW: this runs inside a catch block that then returns a 401
+// to the dashboard. If the cleanup itself threw, the route shim forwards it
+// to the global error middleware → "Internal server error" → the reconnect
+// flow never triggers and the user is stuck (exactly the bug this fixes).
 async function expireShopifyConnection(shop) {
-  await db.run(`
-    UPDATE merchants
-    SET is_active = 0, access_token = NULL, refresh_token = NULL, expires_at = NULL
-    WHERE shop = $1
-  `, [shop]);
-  console.warn(`[Auth] ${shop}: Shopify rejected credentials — connection expired, merchant soft-deactivated (data preserved for reinstall)`);
+  try {
+    await db.run(`
+      UPDATE merchants
+      SET is_active = 0, access_token = \'\', refresh_token = NULL, expires_at = NULL
+      WHERE shop = $1
+    `, [shop]);
+    console.warn(`[Auth] ${shop}: Shopify rejected credentials — connection expired, merchant soft-deactivated (data preserved for reinstall)`);
+  } catch (err) {
+    // Log and continue: the 401 response must still reach the dashboard.
+    console.error(`[Auth] expireShopifyConnection failed for ${shop}: ${err.message} — will retry on next request`);
+  }
 }
 
 // Helper: load merchant's access token with auto-refresh for expiring tokens (API 2026-07+)
@@ -2002,7 +2011,7 @@ app.post('/webhooks/app/uninstalled', async (req, res) => {
     UPDATE merchants
     SET is_active = 0,
         uninstalled_at = CURRENT_TIMESTAMP,
-        access_token = NULL,
+        access_token = \'\',
         refresh_token = NULL,
         expires_at = NULL
     WHERE shop = $1

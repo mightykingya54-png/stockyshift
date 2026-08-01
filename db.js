@@ -12,12 +12,17 @@ sqliteDb.pragma('foreign_keys = ON');
 sqliteDb.pragma('busy_timeout = 5000');
 
 // ─── Schema ──────────────────────────────────────────────────────────────
+// NOTE: merchants.access_token is nullable in schema (line below), but the
+// code NEVER writes NULL into it: databases created by older versions have
+// NOT NULL there, and a NULL write fails the WHOLE UPDATE silently (that was
+// the uninstall-cleanup bug). Convention everywhere: '' = "no token"
+// (all token checks use falsy, so '' behaves exactly like NULL).
 
 sqliteDb.exec(`
   CREATE TABLE IF NOT EXISTS merchants (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     shop TEXT UNIQUE NOT NULL,
-    access_token TEXT NOT NULL,
+    access_token TEXT,
     email TEXT,
     shopify_charge_id TEXT,
     billing_status TEXT DEFAULT 'pending',
