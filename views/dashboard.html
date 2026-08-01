@@ -1168,16 +1168,18 @@
     // "no costs entered" instead of a misleading $0.00.
     function updatePOMultiSummary() {
       let items = 0, units = 0, total = 0;
-      // Track whether the user typed ANY cost anywhere in the table. The old
-      // code keyed the "no costs entered" message on total > 0, so entering a
-      // cost on a row with qty 0 (non-low items start empty) silently left the
-      // message up even though a cost WAS entered — confusing. The math is
-      // unchanged: only rows with qty > 0 contribute qty × cost to the total.
+      // Track costs across ALL rows (not just rows with qty): a cost on a
+      // qty-0 row doesn't change the total (0 × cost = 0), but the footer
+      // must say so — otherwise "$0.00" looks like the app ignored the input.
       let anyCost = false;
+      let costNoQty = 0;
       document.querySelectorAll('#poTable tr[data-title]').forEach(tr => {
         const qty = parseInt(tr.querySelector('.po-qty')?.value) || 0;
         const cost = parseFloat(tr.querySelector('.po-cost')?.value) || 0;
-        if (cost > 0) anyCost = true;
+        if (cost > 0) {
+          anyCost = true;
+          if (qty === 0) costNoQty++;
+        }
         if (qty > 0) {
           items++;
           units += qty;
@@ -1192,7 +1194,10 @@
       }
       const base = `${items} item${items === 1 ? '' : 's'} · ${units} unit${units === 1 ? '' : 's'}`;
       if (anyCost) {
-        el.textContent = `${base} · $${total.toFixed(2)}`;
+        const suffix = costNoQty === 1
+          ? ' — 1 item has a cost but no quantity'
+          : ` — ${costNoQty} items have costs but no quantities`;
+        el.textContent = `${base} · $${total.toFixed(2)}${suffix}`;
       } else {
         el.textContent = `${base} · no costs entered`;
       }
