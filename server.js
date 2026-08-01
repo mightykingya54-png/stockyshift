@@ -996,9 +996,17 @@ app.post('/api/vendors', async (req, res) => {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
+  // Must be numeric — otherwise "abc" stores as text in the REAL column
+  // and renders as "$NaN" in the dashboard
+  let minOrderAmount = 0;
+  if (min_order_amount !== undefined && min_order_amount !== '') {
+    minOrderAmount = Number(min_order_amount);
+    if (Number.isNaN(minOrderAmount)) return res.status(400).json({ error: 'Minimum order amount must be a number' });
+  }
+
   const result = await db.get(
     'INSERT INTO vendors (shop, name, email, min_order_amount, notes) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-    [shop, name, email, min_order_amount || 0, notes || '']
+    [shop, name, email, minOrderAmount, notes || '']
   );
   res.json({ id: result.id });
 });
@@ -1016,10 +1024,18 @@ app.put('/api/vendors/:id', async (req, res) => {
   if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
 
+  // Must be numeric — otherwise "abc" stores as text in the REAL column
+  // and renders as "$NaN" in the dashboard
+  let minOrderAmount = 0;
+  if (min_order_amount !== undefined && min_order_amount !== '') {
+    minOrderAmount = Number(min_order_amount);
+    if (Number.isNaN(minOrderAmount)) return res.status(400).json({ error: 'Minimum order amount must be a number' });
+  }
+
   await db.run(`
     UPDATE vendors SET name = $1, email = $2, min_order_amount = $3, notes = $4
     WHERE id = $5 AND shop = $6
-  `, [name, email, min_order_amount || 0, notes || '', id, shop]);
+  `, [name, email, minOrderAmount, notes || '', id, shop]);
 
   res.json({ success: true });
 });
@@ -1032,18 +1048,25 @@ app.delete('/api/vendors/:id', async (req, res) => {
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid vendor ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
-  // Check if vendor has POs
-  const poCount = await db.get('SELECT COUNT(*) AS count FROM purchase_orders WHERE vendor_id = $1 AND shop = $2', [id, shop]);
-  if (poCount.count > 0) {
+  // Check if vendor has POs — count + delete in ONE synchronous transaction
+  // so a PO created in another tab between the check and the delete cannot
+  // leave a dangling vendor reference (TOCTOU). Native better-sqlite3
+  // transaction: no awaits inside, nothing can interleave.
+  const del = db.transaction((tx) => {
+    const poCount = tx.get('SELECT COUNT(*) AS count FROM purchase_orders WHERE vendor_id = $1 AND shop = $2', [id, shop]);
+    if (poCount.count > 0) return { blocked: true, count: poCount.count };
+
+    // Unset as preferred vendor on products (scoped to shop)
+    tx.run('UPDATE products SET preferred_vendor_id = NULL WHERE preferred_vendor_id = $1 AND shop = $2', [id, shop]);
+    // Delete vendor
+    tx.run('DELETE FROM vendors WHERE id = $1 AND shop = $2', [id, shop]);
+    return { blocked: false };
+  });
+  if (del.blocked) {
     return res.status(400).json({
-      error: `Cannot delete: vendor has ${poCount.count} existing purchase order(s). Delete the POs first.`
+      error: `Cannot delete: vendor has ${del.count} existing purchase order(s). Delete the POs first.`
     });
   }
-
-  // Unset as preferred vendor on products (scoped to shop)
-  await db.run('UPDATE products SET preferred_vendor_id = NULL WHERE preferred_vendor_id = $1 AND shop = $2', [id, shop]);
-  // Delete vendor
-  await db.run('DELETE FROM vendors WHERE id = $1 AND shop = $2', [id, shop]);
 
   res.json({ success: true });
 });

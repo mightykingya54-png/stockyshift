@@ -265,6 +265,16 @@
       to { opacity: 1; transform: translateX(0); }
     }
   </style>
+
+  <style>
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
 </head>
 <body>
   <!-- Trial banner (hidden by default) -->
@@ -405,18 +415,30 @@
       })();
     }
 
-    // Get a fresh session token, refreshing if expired or expiring soon
+    // Get a fresh session token, refreshing if expired or expiring soon.
+    // Single-flight lock: if two API calls trigger a refresh simultaneously,
+    // both await the SAME refresh promise instead of racing two fetches.
+    let __tokenRefreshPromise = null;
     async function getSessionToken() {
       if (!__appBridgeApp || !__getSessionToken) return null;
       // Refresh if token is missing or within 5 min of expiring
       if (!__tokenCache.token || __tokenCache.exp - Date.now() < 5 * 60 * 1000) {
-        try {
-          __tokenCache.token = await __getSessionToken(__appBridgeApp);
-          __tokenCache.exp = Date.now() + 45 * 60 * 1000;
-        } catch (e) {
-          console.warn('Token refresh failed:', e);
-          return __tokenCache.token; // fall back to stale token, let 401 handler retry
+        if (!__tokenRefreshPromise) {
+          __tokenRefreshPromise = __getSessionToken(__appBridgeApp)
+            .then((token) => {
+              __tokenCache.token = token;
+              __tokenCache.exp = Date.now() + 45 * 60 * 1000;
+              return token;
+            })
+            .catch((e) => {
+              console.warn('Token refresh failed:', e);
+              return __tokenCache.token; // fall back to stale token, let 401 handler retry
+            })
+            .finally(() => {
+              __tokenRefreshPromise = null;
+            });
         }
+        return __tokenRefreshPromise;
       }
       return __tokenCache.token;
     }
