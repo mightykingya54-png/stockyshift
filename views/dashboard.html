@@ -1226,6 +1226,19 @@
         }
       }
 
+      // Cost entered on rows with no quantity silently disappears (only rows
+      // with qty > 0 join the order). Catch it BEFORE creating so the typed
+      // cost never gets dropped without a word.
+      let costNoQty = 0;
+      for (const p of products) {
+        const qty = parseInt(document.getElementById(`poQty_${p.id}`)?.value) || 0;
+        const cost = parseFloat(document.getElementById(`poCost_${p.id}`)?.value) || 0;
+        if (qty === 0 && cost > 0) costNoQty++;
+      }
+      if (costNoQty > 0) {
+        return showToast(`Cost entered for ${costNoQty} item(s) without a quantity — add a quantity to include them, or clear the cost.`, 'error');
+      }
+
       if (items.length === 0) return showToast('Enter quantity for at least one product.', 'error');
 
       const btn = document.querySelector('#modalContent .btn-success');
