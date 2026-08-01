@@ -341,7 +341,9 @@ app.get('/auth/callback', async (req, res) => {
     );
 
     const tokenData = tokenResponse.data;
-    console.log(`[OAuth] Token response for ${shop}:`, JSON.stringify(tokenData));
+    // SECURITY: never log tokenData — it contains access_token AND
+    // refresh_token (live credentials for the store). Log metadata only.
+    console.log(`[OAuth] Token exchange succeeded for ${shop} (expires_in: ${tokenData.expires_in || 'n/a'})`);
     const accessToken = tokenData.access_token;
     const refreshToken = tokenData.refresh_token || null;
     const expiresAt = tokenData.expires_in
@@ -922,6 +924,18 @@ app.post('/api/products/reorder-point', async (req, res) => {
     }
   }
 
+  // The vendor must belong to THIS shop — otherwise shop A could attach shop
+  // B's vendor, and /api/products + /api/low-stock would then leak shop B's
+  // vendor name/email to shop A through their JOIN.
+  if (preferred_vendor_id !== undefined && preferred_vendor_id !== null && preferred_vendor_id !== '') {
+    const vendorId = parseInt(preferred_vendor_id);
+    if (!Number.isInteger(vendorId) || vendorId < 1) {
+      return res.status(400).json({ error: 'Invalid vendor ID' });
+    }
+    const vendorCheck = await db.get('SELECT id FROM vendors WHERE id = $1 AND shop = $2', [vendorId, shop]);
+    if (!vendorCheck) return res.status(400).json({ error: 'Vendor not found' });
+  }
+
   await db.run(`
     UPDATE products SET reorder_point = $1, preferred_vendor_id = $2 WHERE id = $3 AND shop = $4
   `, [reorderPoint, preferred_vendor_id || null, productId, shop]);
@@ -1019,6 +1033,19 @@ app.post('/api/purchase-orders', async (req, res) => {
   // Verify vendor belongs to this shop
   const vendorCheck = await db.get('SELECT id FROM vendors WHERE id = $1 AND shop = $2', [vendor_id, shop]);
   if (!vendorCheck) return res.status(400).json({ error: 'Vendor not found' });
+
+  // Verify every product belongs to THIS shop BEFORE writing anything —
+  // otherwise a PO could reference another shop's product, and receiving
+  // would push the wrong inventory item (or corrupt the local DB).
+  for (const item of items) {
+    const productId = parseInt(item.product_id);
+    if (!Number.isInteger(productId) || productId < 1) {
+      return res.status(400).json({ error: 'Invalid product ID' });
+    }
+    const productCheck = await db.get('SELECT id FROM products WHERE id = $1 AND shop = $2', [productId, shop]);
+    if (!productCheck) return res.status(400).json({ error: `Product ${item.product_id} not found` });
+    item.product_id = productId;
+  }
 
   // Generate PO number with random suffix to prevent collision on rapid double-click
   // 4-byte random suffix: 2^32 possibilities per millisecond — collision
@@ -1135,10 +1162,11 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'Invalid PO ID' });
   if (!await getToken(shop)) return res.status(401).json({ error: 'Not installed' });
 
-  if (receiveLocks.has(id)) {
+  const lockKey = `${shop}:${id}`; // per-shop: PO ids collide across shops
+  if (receiveLocks.has(lockKey)) {
     return res.status(409).json({ error: 'This PO is already being received — wait a moment and try again.' });
   }
-  receiveLocks.set(id, true);
+  receiveLocks.set(lockKey, true);
   try {
 
   // Validate items shape and quantities (deltas, not absolute totals)
@@ -1169,7 +1197,8 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   // Collect inventory adjustments needed (computed during transaction below)
   const adjustments = [];
 
-  await db.transaction((tx) => {
+  try {
+    await db.transaction((tx) => {
     for (const item of items) {
       // Atomic re-check INSIDE the transaction (better-sqlite3 is synchronous,
       // so no other request can interleave here — closes the TOCTOU race)
@@ -1224,7 +1253,17 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
         UPDATE purchase_orders SET status = 'partial' WHERE id = $1
       `, [id]);
     }
-  });
+    });
+  } catch (err) {
+    // Validation errors thrown inside the transaction (over-receipt, line
+    // item mismatch) are USER errors → 400 with the readable message.
+    // Anything else (SQLITE_BUSY, etc.) rethrows → 500 via the global handler.
+    const msg = String(err?.message || '');
+    if (msg.startsWith('Cannot receive more than') || msg.startsWith('Line item')) {
+      return res.status(400).json({ error: msg });
+    }
+    throw err;
+  }
 
   // After transaction: push inventory adjustments to Shopify. If a push fails,
   // roll back the affected line item's received_qty to its old value so the UI
@@ -1360,7 +1399,7 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
 
   res.json({ success: true, adjustments: adjustments.length });
   } finally {
-    receiveLocks.delete(id);
+    receiveLocks.delete(lockKey);
   }
 });
 

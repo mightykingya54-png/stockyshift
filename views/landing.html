@@ -86,13 +86,15 @@
         // so App Bridge can initialize in the dashboard
         const fullQuery = window.location.search;
         if (r.ok) {
-          goTop('/' + fullQuery);
+          // ABSOLUTE URLs only: window.top is admin.shopify.com in embedded
+          // mode, so relative paths would resolve against the WRONG origin.
+          goTop(window.location.origin + '/' + fullQuery);
         } else {
-          goTop('/auth?shop=' + encodeURIComponent(shop));
+          goTop(window.location.origin + '/auth?shop=' + encodeURIComponent(shop));
         }
       })
       .catch(() => {
-        goTop('/auth?shop=' + encodeURIComponent(shop));
+        goTop(window.location.origin + '/auth?shop=' + encodeURIComponent(shop));
       });
   } else if (isEmbedded && !shop) {
     // Embedded but no shop found — show error instead of infinite spinner
