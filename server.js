@@ -409,8 +409,7 @@ app.get('/auth/callback', async (req, res) => {
     // Redirect merchant into the EMBEDDED app inside the Shopify admin
     // (matches /billing/confirm behavior — landing on the standalone /?shop=
     // page after install is jarring and doesn't match App Store expectations)
-    const storeSlug = shop.replace(/\.myshopify\.com$/i, '');
-    res.redirect(`https://admin.shopify.com/store/${storeSlug}/apps/stockyshift`);
+    res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
   } catch (err) {
     console.error('OAuth error:', err.response?.data || err.message);
     res.status(500).send('Installation failed. Please try again.');
@@ -559,6 +558,14 @@ function requireShop(req, res) {
   const shop = getShop(req);
   if (!shop) { res.status(401).json({ error: 'Authentication required' }); return null; }
   return shop;
+}
+
+// Store slug for https://admin.shopify.com/store/{slug} redirects: Shopify
+// admin URLs use dashes where the store name has dots ("my.store" becomes
+// "my-store"). Previous code only stripped the .myshopify.com suffix, so
+// stores with dots in their name got redirected to a URL that 404s.
+function storeSlug(shop) {
+  return String(shop).replace(/\.myshopify\.com$/i, '').replace(/\./g, '-');
 }
 
 // Shopify returns this exact message when the access token is invalid or
@@ -941,9 +948,19 @@ app.post('/api/products/reorder-point', async (req, res) => {
     if (!vendorCheck) return res.status(400).json({ error: 'Vendor not found' });
   }
 
-  await db.run(`
-    UPDATE products SET reorder_point = $1, preferred_vendor_id = $2 WHERE id = $3 AND shop = $4
-  `, [reorderPoint, preferred_vendor_id || null, productId, shop]);
+  if (preferred_vendor_id === undefined) {
+    // Field not sent — preserve the existing vendor. Previous code wrote
+    // NULL whenever the client omitted the field, silently detaching every
+    // vendor whenever a merchant edited just the reorder point.
+    await db.run(`
+      UPDATE products SET reorder_point = $1 WHERE id = $2 AND shop = $3
+    `, [reorderPoint, productId, shop]);
+  } else {
+    // Explicitly sent ('' clears the vendor, an id attaches it)
+    await db.run(`
+      UPDATE products SET reorder_point = $1, preferred_vendor_id = $2 WHERE id = $3 AND shop = $4
+    `, [reorderPoint, preferred_vendor_id || null, productId, shop]);
+  }
 
   res.json({ success: true });
 });
@@ -1200,9 +1217,11 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   receiveLocks.set(lockKey, true);
   try {
 
-  // Validate items shape and quantities (deltas, not absolute totals)
-  if (!Array.isArray(items)) {
-    return res.status(400).json({ error: 'items must be an array' });
+  // Validate items shape and quantities (deltas, not absolute totals).
+  // Empty arrays are a client bug — receiving nothing would flip the PO to
+  // 'partial' purely from the status recompute, with zero actual receipt.
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items must be a non-empty array' });
   }
   for (const item of items) {
     const delta = parseInt(item.received_delta ?? item.received_qty ?? 0);
@@ -1218,8 +1237,15 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   }
 
   // Verify PO belongs to this shop
-  const po = await db.get('SELECT id FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
+  const po = await db.get('SELECT id, status FROM purchase_orders WHERE id = $1 AND shop = $2', [id, shop]);
   if (!po) return res.status(404).json({ error: 'PO not found' });
+  // Only sent/partial POs can receive — draft POs were never shipped to the
+  // vendor, so receiving against one would record inventory for stock the
+  // merchant never ordered. (Fully received POs fail per-line anyway, since
+  // every positive delta would exceed ordered_qty.)
+  if (po.status !== 'sent' && po.status !== 'partial') {
+    return res.status(400).json({ error: 'This PO cannot be received — only sent or partially received POs can receive stock' });
+  }
 
   // Verify all line items belong to this PO and compute new totals
   // (validation happens again INSIDE the transaction — see below —
@@ -1302,6 +1328,11 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
   if (adjustments.length > 0) {
     let locationId = null;
     const failedLineItemIds = new Set();
+    // Dead Shopify connection flag: when set, roll back everything Shopify
+    // never confirmed and ONLY THEN return 401. The previous code returned
+    // 401 from inside the push loop/catch, skipping the rollback — leaving
+    // received_qty committed locally for adjustments Shopify never applied.
+    let deadConnection = false;
     try {
       const token = await getToken(shop);
       // Get first location via GraphQL (most merchants have only one)
@@ -1313,7 +1344,8 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
       locationId = locRes.data?.data?.locations?.edges?.[0]?.node?.id || null;
 
       if (locationId) {
-        for (const adj of adjustments) {
+        for (let i = 0; i < adjustments.length; i++) {
+          const adj = adjustments[i];
           const mutation = `
             mutation($input: InventoryAdjustQuantitiesInput!) {
               inventoryAdjustQuantities(input: $input) {
@@ -1351,18 +1383,24 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
             await db.run('UPDATE products SET current_stock = current_stock + $1 WHERE id = $2 AND shop = $3',
               [adj.delta, adj.product_id, shop]);
           } catch (itemErr) {
-            // Dead connection (store uninstalled / token revoked): surface a
-            // reconnect prompt instead of rolling everything back into a
-            // "received" state that Shopify never saw.
+            // Dead connection (store uninstalled / token revoked): mark this
+            // item AND everything after it for rollback (only Shopify-confirmed
+            // pushes keep their local received_qty), stop pushing, then fall
+            // through to the rollback block below — the 401 is sent AFTER the
+            // rollback so local state matches what Shopify actually saw.
             if (isShopifyAuthError(itemErr)) {
               await expireShopifyConnection(shop);
-              return res.status(401).json({ error: 'Shopify connection expired — reconnect to continue.', reauth: true });
+              deadConnection = true;
+              for (let j = i; j < adjustments.length; j++) {
+                failedLineItemIds.add(adjustments[j].line_item_id);
+              }
+              break;
             }
             failedLineItemIds.add(adj.line_item_id);
             console.error(`[Receive] Failed to push inventory for item ${adj.inventory_item_id} (${shop}):`, itemErr.message);
           }
         }
-        console.log(`[Receive] Shopify inventory updated for ${shop} at location ${locationId}`);
+        if (!deadConnection) console.log(`[Receive] Shopify inventory updated for ${shop} at location ${locationId}`);
       } else {
         // No location found — all adjustments failed
         for (const adj of adjustments) {
@@ -1371,17 +1409,22 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
         console.warn(`[Receive] No locations found for ${shop} — Shopify inventory not updated`);
       }
     } catch (err) {
-      // Dead connection on the locations query (the first Shopify call):
-      // reconnect prompt, same as above.
+      // Dead connection on the locations query (the first Shopify call): no
+      // adjustment was pushed, so EVERY local received_qty commit (done in the
+      // sync transaction above) needs rollback before the 401 goes out.
       if (isShopifyAuthError(err)) {
         await expireShopifyConnection(shop);
-        return res.status(401).json({ error: 'Shopify connection expired — reconnect to continue.', reauth: true });
+        deadConnection = true;
+        for (const adj of adjustments) {
+          failedLineItemIds.add(adj.line_item_id);
+        }
+      } else {
+        // Entire Shopify push failed — all adjustments need rollback
+        for (const adj of adjustments) {
+          failedLineItemIds.add(adj.line_item_id);
+        }
+        console.error(`[Receive] Shopify inventory update failed for ${shop}:`, err.response?.data || err.message);
       }
-      // Entire Shopify push failed — all adjustments need rollback
-      for (const adj of adjustments) {
-        failedLineItemIds.add(adj.line_item_id);
-      }
-      console.error(`[Receive] Shopify inventory update failed for ${shop}:`, err.response?.data || err.message);
     }
 
     // Roll back received_qty for any items whose Shopify push failed.
@@ -1425,6 +1468,13 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
         `, [newStatus, id]);
         console.warn(`[Receive] PO ${id} status recomputed to '${newStatus}' after rollback`);
       });
+    }
+
+    // Rollback has run (if anything failed) — only now is local state
+    // consistent with what Shopify actually saw, so it's safe to surface the
+    // reconnect prompt.
+    if (deadConnection) {
+      return res.status(401).json({ error: 'Shopify connection expired — reconnect to continue.', reauth: true });
     }
   }
 
@@ -1744,8 +1794,7 @@ app.get('/billing/test-confirm', async (req, res) => {
   const { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop');
   // Already activated by /api/billing/create, just redirect to dashboard
-  const storeSlug = String(shop).replace(/\.myshopify\.com$/i, '');
-  res.redirect(`https://admin.shopify.com/store/${storeSlug}/apps/stockyshift`);
+  res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
 });
 
 // Callback from Shopify after merchant approves (or declines) billing
@@ -1758,11 +1807,33 @@ app.get('/billing/confirm', async (req, res) => {
   if (!shop) return res.status(400).send('Missing shop parameter — this URL should only be accessed via Shopify billing redirect');
 
   // Merchant declined billing — mark it explicitly and redirect back into the
-  // admin with the declined flag (dashboard shows the message on the overlay)
+  // admin with the declined flag (dashboard shows the message on the overlay).
+  // SECURITY: this GET is unauthenticated (browser redirect from Shopify
+  // billing), so it must not be usable as a downgrade vector: only touch shops
+  // that actually have the app installed, and never flip an actively paying
+  // merchant to 'declined' on query params alone — verify with Shopify first.
   if (!charge_id && !subscription_id) {
+    const token = await getToken(shop);
+    if (!token) return res.status(401).send('Not installed');
+    const current = await db.get('SELECT billing_status FROM merchants WHERE shop = $1', [shop]);
+    if (current?.billing_status === 'active') {
+      // Fail closed: if we cannot verify, assume the subscription is active
+      // and do NOT downgrade.
+      let hasActiveSub = true;
+      try {
+        const verifyRes = await axios.post(
+          `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+          { query: `{ currentAppInstallation { activeSubscriptions { id } } }` },
+          { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
+        );
+        hasActiveSub = (verifyRes.data?.data?.currentAppInstallation?.activeSubscriptions || []).length > 0;
+      } catch { /* verification failed — leave hasActiveSub = true */ }
+      if (hasActiveSub) {
+        return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
+      }
+    }
     await db.run(`UPDATE merchants SET billing_status = 'declined' WHERE shop = $1`, [shop]);
-    const storeSlug = shop.replace(/\.myshopify\.com$/i, '');
-    return res.redirect(`https://admin.shopify.com/store/${storeSlug}/apps/stockyshift?billing=declined`);
+    return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift?billing=declined`);
   }
 
   const token = await getToken(shop);
@@ -1820,8 +1891,7 @@ app.get('/billing/confirm', async (req, res) => {
     // Redirect back into the Shopify admin where the app is embedded.
     // (Landing on the bare app URL would drop the merchant out of the admin
     // chrome — the embedded route is admin.shopify.com/store/<slug>/apps/stockyshift.)
-    const storeSlug = shop.replace(/\.myshopify\.com$/i, '');
-    res.redirect(`https://admin.shopify.com/store/${storeSlug}/apps/stockyshift`);
+    res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
   } catch (err) {
     console.error('[Billing] Confirm error:', err.message);
     res.status(500).send('Failed to activate billing. Please try again.');
@@ -1966,6 +2036,11 @@ app.get('/api/db-health', async (req, res) => {
 });
 
 // ─── Cron: Daily Auto-Sync (07:45) + Low Stock Check (08:00) ─────────────
+// NOTE: cron runs in UTC (Render containers default to UTC). 07:45/08:00 UTC
+// is 3:45/4:00 AM Eastern — intentional: sync + alerts land before the US
+// workday. There is no per-merchant timezone support yet; if a merchant in
+// another timezone complains about alert timing, this is the place to add
+// per-shop TZ offsets (merchants.tz column or similar).
 
 // Auto-sync every active merchant's products BEFORE the low-stock check so
 // alerts fire on fresh stock levels. Manual-only sync meant a merchant who
@@ -1996,7 +2071,8 @@ cron.schedule('45 7 * * *', async () => {
 
 // ─── Cron Job: Daily Low Stock Check ─────────────────────────────────────
 
-// Run at 8:00 AM every day
+// Run at 08:00 UTC every day (3:45/4:00 AM Eastern; see the timezone note
+// above the auto-sync cron — no per-shop timezone support yet).
 cron.schedule('0 8 * * *', async () => {
   console.log('[Cron] Running daily low stock check...');
   try {

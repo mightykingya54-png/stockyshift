@@ -529,8 +529,18 @@
     // ─── API helper ─────────────────────────────────────────────────
 
     async function api(path, opts = {}) {
-      // Wait for App Bridge init if embedded (non-blocking in standalone)
-      if (__appBridgeReady) await __appBridgeReady;
+      // Wait for App Bridge init if embedded (non-fatal in standalone) — but
+      // capped at 3s: a stalled CDN import (blocked network, hung tab) used to
+      // hang EVERY API call forever, because this await sat in front of the
+      // fetch timeout. Past the cap we proceed without a session token; the
+      // cookie session (SameSite=None, sent by the iframe) still authenticates,
+      // and getSessionToken() falls back gracefully once init finishes.
+      if (__appBridgeReady) {
+        await Promise.race([
+          __appBridgeReady,
+          new Promise((resolve) => setTimeout(resolve, 3000)),
+        ]);
+      }
 
       const doFetch = async () => {
         const token = await getSessionToken();
