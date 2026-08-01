@@ -1168,23 +1168,30 @@
     // "no costs entered" instead of a misleading $0.00.
     function updatePOMultiSummary() {
       let items = 0, units = 0, total = 0;
+      // Track whether the user typed ANY cost anywhere in the table. The old
+      // code keyed the "no costs entered" message on total > 0, so entering a
+      // cost on a row with qty 0 (non-low items start empty) silently left the
+      // message up even though a cost WAS entered — confusing. The math is
+      // unchanged: only rows with qty > 0 contribute qty × cost to the total.
+      let anyCost = false;
       document.querySelectorAll('#poTable tr[data-title]').forEach(tr => {
         const qty = parseInt(tr.querySelector('.po-qty')?.value) || 0;
+        const cost = parseFloat(tr.querySelector('.po-cost')?.value) || 0;
+        if (cost > 0) anyCost = true;
         if (qty > 0) {
           items++;
           units += qty;
-          const cost = parseFloat(tr.querySelector('.po-cost')?.value) || 0;
           total += qty * cost;
         }
       });
       const el = document.getElementById('poTotal');
       if (!el) return;
       if (items === 0) {
-        el.textContent = 'Total: $0.00';
+        el.textContent = 'No items selected';
         return;
       }
       const base = `${items} item${items === 1 ? '' : 's'} · ${units} unit${units === 1 ? '' : 's'}`;
-      if (total > 0) {
+      if (anyCost) {
         el.textContent = `${base} · $${total.toFixed(2)}`;
       } else {
         el.textContent = `${base} · no costs entered`;
