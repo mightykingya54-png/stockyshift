@@ -446,7 +446,7 @@ app.get('/auth/callback', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (re
         console.warn(`[OAuth] ${shop} plan-type check failed: ${err.message} — assuming production`);
       }
 
-      if (isDevStore) {
+      if (isDevStore && !DEV_SHOW_BILLING) {
         const trialEnd = new Date();
         trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
         await db.run(`
@@ -455,6 +455,9 @@ app.get('/auth/callback', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (re
         `, [trialEnd.toISOString(), shop]);
         console.log(`[OAuth] ${shop} is a dev store — auto-activated with ${BILLING_PLAN.trial_days}-day trial, no Shopify charge`);
       } else {
+        if (DEV_SHOW_BILLING) {
+          console.log(`[OAuth] DEV_SHOW_BILLING active — ${shop} treated as production (dev-store auto-trial skipped)`);
+        }
         try {
           const gqlRes = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
             query: `{
@@ -1801,6 +1804,16 @@ const BILLING_PLAN = {
   return_url: `${APP_URL}/billing/confirm`,
 };
 
+// DEV_SHOW_BILLING=true — testing-only escape hatch. On a dev store the
+// normal OAuth heal auto-activates the 7-day trial (no Shopify charge), so
+// the real App Pricing page is never exercised. When this flag is set, dev
+// stores are treated like production stores: they stay 'pending', the
+// dashboard shows the upgrade overlay, and /api/billing/create returns the
+// REAL Shopify confirmation_url so the merchant can approve the actual
+// App Pricing page. Must be explicitly enabled in env — off by default —
+// so production (where this flag is not set) is unaffected.
+const DEV_SHOW_BILLING = process.env.DEV_SHOW_BILLING === 'true';
+
 // Check if billing is active (or in trial) for a shop
 function isBillingActive(merchant) {
   if (process.env.NODE_ENV !== 'production' && process.env.SKIP_BILLING === 'true') return true;
@@ -1856,7 +1869,11 @@ async function createCharge(shop, token) {
         returnUrl: BILLING_PLAN.return_url,
         trialDays: BILLING_PLAN.trial_days,
         price: BILLING_PLAN.price,
-        test: process.env.BILLING_TEST_MODE === 'true',
+        // Test subscriptions: REQUESTED when testing the real App Pricing page
+        // on a dev store (DEV_SHOW_BILLING) or here BILLING_TEST_MODE skips
+        // Shopify entirely. A dev store can't process a real $29 charge, so
+        // test:true is required for the confirmation page to be usable there.
+        test: DEV_SHOW_BILLING || process.env.BILLING_TEST_MODE === 'true',
       },
     },
     { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 15000 }
