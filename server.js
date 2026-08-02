@@ -365,7 +365,8 @@ app.get('/auth/callback', async (req, res) => {
       ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
       : null;
 
-    // Store merchant in database — set billing to 'pending' so they see the trial offer page first
+    // Store merchant in database — set to 'pending' initially, then heal if
+    // Shopify App Pricing already created a subscription (modern install flow).
     await db.run(`
       INSERT INTO merchants (shop, access_token, refresh_token, expires_at, billing_status, trial_ends_at)
       VALUES ($1, $2, $3, $4, 'pending', NULL)
@@ -384,6 +385,78 @@ app.get('/auth/callback', async (req, res) => {
           ELSE trial_ends_at
         END
     `, [shop, accessToken, refreshToken, expiresAt]);
+
+    // Heal billing status for App Pricing installs: dev stores get auto-activated
+    // (no charge), and production stores may have an App Pricing subscription
+    // created automatically when they pick a plan on the install screen.
+    const merchant = await db.get('SELECT trial_used FROM merchants WHERE shop = $1', [shop]);
+    if (merchant && !merchant.trial_used) {
+      // First: check shop plan type. Dev/affiliate/staff stores bypass billing
+      // entirely — set them as 'trial' with no Shopify charge ID. Production
+      // stores get the App Pricing subscription lookup below.
+      let isDevStore = false;
+      try {
+        const shopInfo = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+          query: `{ shop { plan { partnerType } } }`,
+        }, {
+          headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' },
+          timeout: 8000,
+        });
+        const partnerType = shopInfo.data?.data?.shop?.plan?.partnerType;
+        console.log(`[OAuth] ${shop} partnerType=${partnerType || 'unknown'}`);
+        if (['affiliate', 'staff', 'shopify_plus_partner', 'partner_test'].includes(partnerType)) {
+          isDevStore = true;
+        }
+      } catch (err) {
+        console.warn(`[OAuth] ${shop} plan-type check failed: ${err.message} — assuming production`);
+      }
+
+      if (isDevStore) {
+        const trialEnd = new Date();
+        trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
+        await db.run(`
+          UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, trial_used = 1
+          WHERE shop = $2
+        `, [trialEnd.toISOString(), shop]);
+        console.log(`[OAuth] ${shop} is a dev store — auto-activated with ${BILLING_PLAN.trial_days}-day trial, no Shopify charge`);
+      } else {
+        try {
+          const gqlRes = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+            query: `{
+              currentAppInstallation {
+                activeSubscriptions { id status trialDays remainingTrialDays }
+              }
+          }`,
+        }, {
+          headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' },
+          timeout: 8000,
+        });
+        const subs = gqlRes.data?.data?.currentAppInstallation?.activeSubscriptions || [];
+        const activeSub = subs.find(s =>
+          String(s.status).toUpperCase() === 'ACTIVE' || String(s.status).toUpperCase() === 'TRIALING'
+        );
+        if (activeSub) {
+          const trialEnd = activeSub.remainingTrialDays && activeSub.remainingTrialDays > 0
+            ? new Date(Date.now() + activeSub.remainingTrialDays * 86400000).toISOString()
+            : null;
+          await db.run(`
+            UPDATE merchants SET
+              billing_status = 'trial',
+              trial_ends_at = $1,
+              shopify_charge_id = $2,
+              trial_used = 1
+            WHERE shop = $3
+          `, [trialEnd, String(activeSub.id).replace(/^gid:\/\/shopify\/AppSubscription\//, ''), shop]);
+          console.log(`[OAuth] ${shop} App Pricing sub detected — status: ${activeSub.status}, trial until: ${trialEnd || 'n/api'}`);
+        }
+      } catch (healErr) {
+        // Non-fatal: if this GraphQL call fails, the merchant still gets the
+        // trial overlay and can click "Start Trial" manually (but it's
+        // the manual flow that can fail with "Session expired").
+        console.warn(`[OAuth] Could not heal billing for ${shop}: ${healErr.message}`);
+      }
+      } // end else (production store)
+    }
 
     // Notify founder of new install (async, non-blocking)
     const notifyEmail = process.env.NOTIFY_EMAIL || 'stockyshift@stockyshift.com';
@@ -1786,7 +1859,91 @@ app.post('/api/billing/create', async (req, res) => {
   if (!shop) return;
 
   const token = await getToken(shop);
-  if (!token) return res.status(401).json({ error: 'Not installed' });
+  if (!token) {
+    console.error(`[Billing Debug] ${shop} getToken returned null — checking DB`);
+    const rawMerchant = await db.get('SELECT access_token, is_active, expires_at FROM merchants WHERE shop = $1', [shop]);
+    console.error(`[Billing Debug] merchant row:`, { has_token: !!rawMerchant?.access_token, is_active: rawMerchant?.is_active, expires_at: rawMerchant?.expires_at });
+    return res.status(401).json({ error: 'Not installed' });
+  }
+
+  console.log(`[Billing Debug] ${shop} token present, length=${token.length}, trying App Pricing lookup`);
+
+  // DEV STORE SHORTCUT: Shopify Partner dev stores (and trial stores) get
+  // the app for free — no charge is ever created on them. The "Free for
+  // partners and developers" toggle in App Pricing means Shopify auto-activates
+  // the plan with no charge record. Trying to create a charge on a dev store
+  // fails with "Invalid API key or access token" (Shopify rejects the mutation
+  // because the dev store is exempt from billing). Detect them by querying
+  // shop details: if plan.partnerType is "affiliate" or "staff", skip billing
+  // entirely and activate locally. This is the standard Shopify pattern.
+  if (shop.endsWith('.myshopify.com')) {
+    try {
+      const shopInfo = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+        query: `{ shop { plan { partnerType } myshopifyDomain } }`,
+      }, {
+        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+        timeout: 8000,
+      });
+      const partnerType = shopInfo.data?.data?.shop?.plan?.partnerType;
+      console.log(`[Billing Debug] ${shop} partnerType=${partnerType}`);
+      // affiliate = dev store, staff = Shopify staff store, plus a few others
+      if (['affiliate', 'staff', 'shopify_plus_partner', 'partner_test'].includes(partnerType)) {
+        const trialEnd = new Date();
+        trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
+        await db.run(`
+          UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, trial_used = 1
+          WHERE shop = $2
+        `, [trialEnd.toISOString(), shop]);
+        console.log(`[Billing] ${shop} is a dev store (${partnerType}) — activated with ${BILLING_PLAN.trial_days}-day trial, no charge created`);
+        return res.json({ confirmation_url: `https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift` });
+      }
+    } catch (err) {
+      console.warn(`[Billing] ${shop} dev store detection failed: ${err.message} — falling through to charge creation`);
+    }
+  }
+
+  // Shopify App Pricing: if the merchant already picked a plan on the App
+  // Pricing screen, Shopify auto-creates the subscription. Query it live
+  // and heal the local status instead of trying to create a duplicate
+  // charge (which Shopify rejects, causing the "Session expired" error).
+  const merchant = await db.get('SELECT billing_status, trial_used FROM merchants WHERE shop = $1', [shop]);
+  if (merchant && merchant.billing_status === 'pending') {
+    try {
+      const gqlRes = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+        query: `{
+          currentAppInstallation {
+            activeSubscriptions { id status trialDays remainingTrialDays }
+          }
+        }`,
+      }, {
+        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+        timeout: 8000,
+      });
+      console.log(`[Billing Debug] ${shop} activeSubs response:`, JSON.stringify(gqlRes.data).slice(0, 500));
+      const subs = gqlRes.data?.data?.currentAppInstallation?.activeSubscriptions || [];
+      const activeSub = subs.find(s =>
+        String(s.status).toUpperCase() === 'ACTIVE' || String(s.status).toUpperCase() === 'TRIALING'
+      );
+      if (activeSub) {
+        const trialEnd = activeSub.remainingTrialDays && activeSub.remainingTrialDays > 0
+          ? new Date(Date.now() + activeSub.remainingTrialDays * 86400000).toISOString()
+          : null;
+        await db.run(`
+          UPDATE merchants SET
+            billing_status = 'trial',
+            trial_ends_at = $1,
+            shopify_charge_id = $2,
+            trial_used = 1
+          WHERE shop = $3
+        `, [trialEnd, String(activeSub.id).replace(/^gid:\/\/shopify\/AppSubscription\//, ''), shop]);
+        console.log(`[Billing] ${shop} App Pricing sub detected — redirecting to dashboard`);
+        return res.json({ confirmation_url: `https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift` });
+      }
+    } catch (err) {
+      console.warn(`[Billing] App Pricing lookup failed for ${shop}: ${err.message} — falling back to manual charge`);
+      console.warn(`[Billing Debug] Failure detail:`, JSON.stringify(err.response?.data || err.message).slice(0, 800));
+    }
+  }
 
   // BILLING_TEST_MODE: skip Shopify's billing API, activate locally
   if (process.env.BILLING_TEST_MODE === 'true') {

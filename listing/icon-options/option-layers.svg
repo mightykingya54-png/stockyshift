@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgC" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#151A30"/>
+      <stop offset="100%" stop-color="#2D3561"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="120" fill="url(#bgC)"/>
+  <!-- Top layer -->
+  <rect x="136" y="136" width="220" height="200" rx="40" fill="#ffffff" transform="rotate(-12, 256, 256)"/>
+  <!-- Bottom layer -->
+  <rect x="176" y="136" width="220" height="200" rx="40" fill="#7C5CE7" transform="rotate(-12, 256, 256)"/>
+  <!-- Plus/mark on top layer -->
+  <rect x="230" y="210" width="52" height="32" rx="16" fill="#151A30"/>
+  <rect x="220" y="220" width="32" height="52" rx="16" fill="#151A30"/>
+</svg>

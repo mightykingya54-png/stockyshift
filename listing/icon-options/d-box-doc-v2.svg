@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f1729"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="boxTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#7c5ce7"/>
+      <stop offset="100%" stop-color="#6d4dd4"/>
+    </linearGradient>
+    <linearGradient id="boxFront" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5b3abf"/>
+      <stop offset="100%" stop-color="#4a2a9e"/>
+    </linearGradient>
+    <linearGradient id="boxSide" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4a2a9e"/>
+      <stop offset="100%" stop-color="#3d2180"/>
+    </linearGradient>
+    <filter id="docShadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.30"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="120" fill="url(#bg)"/>
+
+  <!-- Floor shadow -->
+  <ellipse cx="256" cy="370" rx="130" ry="20" fill="rgba(0,0,0,0.3)"/>
+
+  <!-- 3D Box -->
+  <!-- Left face -->
+  <path d="M140 240 L225 290 L225 400 L140 350 Z" fill="url(#boxSide)"/>
+  <!-- Front face -->
+  <path d="M225 290 L365 290 L365 400 L225 400 Z" fill="url(#boxFront)"/>
+  <!-- Top face -->
+  <path d="M140 240 L225 190 L365 190 L280 240 Z" fill="url(#boxTop)"/>
+  <!-- Top face highlight -->
+  <path d="M160 227 L228 187 L350 187 L282 227 Z" fill="rgba(255,255,255,0.08)"/>
+
+  <!-- Document (PO) floating on top -->
+  <g filter="url(#docShadow)">
+    <rect x="175" y="134" width="170" height="190" rx="16" fill="#ffffff"/>
+    <!-- Document inner highlight at top -->
+    <rect x="179" y="138" width="162" height="4" rx="2" fill="rgba(124,92,231,0.2)"/>
+    <!-- PO lines -->
+    <rect x="199" y="174" width="120" height="8" rx="4" fill="#e2e8f0"/>
+    <rect x="199" y="196" width="96" height="8" rx="4" fill="#e2e8f0"/>
+    <rect x="199" y="218" width="108" height="8" rx="4" fill="#e2e8f0"/>
+    <rect x="199" y="240" width="72" height="8" rx="4" fill="#e2e8f0"/>
+    <!-- Divider line -->
+    <rect x="191" y="266" width="138" height="2" rx="1" fill="#e2e8f0"/>
+    <!-- Total line -->
+    <rect x="199" y="282" width="64" height="10" rx="5" fill="#7c5ce7"/>
+  </g>
+
+  <!-- Checkmark circle (bottom right of doc) -->
+  <circle cx="310" cy="296" r="20" fill="#22c55e"/>
+  <path d="M300 296 L307 303 L320 290" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

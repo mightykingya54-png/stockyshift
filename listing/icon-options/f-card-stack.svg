@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgF" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f1729"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="120" fill="url(#bgF)"/>
+  <!-- Bottom card -->
+  <rect x="230" y="200" width="180" height="160" rx="24" fill="#7c5ce7" opacity="0.4"/>
+  <!-- Middle card -->
+  <rect x="190" y="184" width="200" height="160" rx="24" fill="#7c5ce7" opacity="0.7"/>
+  <!-- Top card -->
+  <rect x="150" y="168" width="220" height="160" rx="24" fill="#ffffff"/>
+  <!-- Card lines (PO/receipt feel) -->
+  <rect x="176" y="200" width="120" height="8" rx="4" fill="#94a3b8"/>
+  <rect x="176" y="224" width="90" height="8" rx="4" fill="#94a3b8"/>
+  <rect x="176" y="248" width="140" height="8" rx="4" fill="#94a3b8"/>
+  <rect x="176" y="272" width="70" height="8" rx="4" fill="#94a3b8"/>
+  <!-- Checkmark circle (confirmed PO) -->
+  <circle cx="310" cy="182" r="22" fill="#22c55e"/>
+  <path d="M300 182 L308 190 L320 174" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

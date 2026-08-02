@@ -1,24 +1,41 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <!-- Background: brand navy, rounded square (Shopify icon-safe) -->
-  <rect width="512" height="512" rx="112" fill="#1a1a2e"/>
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#141e3a"/>
+      <stop offset="100%" stop-color="#1a2a50"/>
+    </linearGradient>
+    <linearGradient id="purpleGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7c5ce7"/>
+      <stop offset="100%" stop-color="#5b3abf"/>
+    </linearGradient>
+    <filter id="cardShadow">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#000" flood-opacity="0.42"/>
+    </filter>
+  </defs>
 
-  <!-- Shipping box (isometric) -->
-  <!-- Top face -->
-  <path d="M256 96 L392 164 L256 232 L120 164 Z" fill="#4a6cf7"/>
-  <!-- Left face -->
-  <path d="M120 164 L120 332 L256 400 L256 232 Z" fill="#2d4fd8"/>
-  <!-- Right face -->
-  <path d="M392 164 L392 332 L256 400 L256 232 Z" fill="#2440b5"/>
-  <!-- Box flap line on top face -->
-  <path d="M256 96 L256 232" stroke="#1a1a2e" stroke-width="6" opacity="0.25" fill="none"/>
+  <!-- Background -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
 
-  <!-- Upward restock arrow (white) -->
-  <g stroke="#ffffff" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" fill="none">
-    <path d="M256 352 L256 248"/>
-    <path d="M216 288 L256 248 L296 288"/>
+  <!-- Floor shadow -->
+  <ellipse cx="256" cy="390" rx="130" ry="18" fill="rgba(0,0,0,0.28)"/>
+
+  <!-- White card -->
+  <g filter="url(#cardShadow)">
+    <rect x="100" y="140" width="312" height="236" rx="40" fill="#ffffff"/>
   </g>
 
-  <!-- Checkmark accent in top-right -->
-  <circle cx="392" cy="104" r="36" fill="#059669"/>
-  <path d="M374 104 L386 116 L410 90" stroke="#ffffff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- LEFT: Purchase Order document icon -->
+  <rect x="148" y="188" width="64" height="80" rx="12" fill="url(#purpleGrad)"/>
+  <!-- Document lines -->
+  <rect x="164" y="214" width="32" height="5" rx="2.5" fill="rgba(255,255,255,0.4)"/>
+  <rect x="164" y="228" width="24" height="5" rx="2.5" fill="rgba(255,255,255,0.4)"/>
+  <rect x="164" y="242" width="30" height="5" rx="2.5" fill="rgba(255,255,255,0.4)"/>
+
+  <!-- Connection arrow bridge -->
+  <rect x="224" y="210" width="48" height="24" rx="12" fill="#e8ecf5"/>
+
+  <!-- RIGHT: Stock circle with up arrow -->
+  <circle cx="308" cy="224" r="42" fill="url(#purpleGrad)"/>
+  <!-- Checkmark inside circle -->
+  <path d="M292 224 L302 234 L324 214" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
