@@ -414,7 +414,7 @@ app.get('/auth/callback', async (req, res) => {
         console.warn(`[OAuth] ${shop} plan-type check failed: ${err.message} — assuming production`);
       }
 
-      if (isDevStore && process.env.SKIP_DEV_STORE_HEAL !== 'true') {
+      if (isDevStore) {
         const trialEnd = new Date();
         trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
         await db.run(`
