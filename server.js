@@ -1809,7 +1809,11 @@ if (process.env.NODE_ENV !== 'production') {
 // ─── Billing (Shopify Billing API) ──────────────────────────────────────
 
 const BILLING_PLAN = {
-  name: 'StockyShift Monthly',
+  // MUST match the plan configured in the Partner Dashboard (App Pricing).
+  // Dashboard plan: "starter" — $29/month, 7-day trial. If you rename the
+  // plan in the dashboard, update this to match, or Shopify's manual
+  // appSubscriptionCreate fallback can create mismatched charges.
+  name: 'starter',
   price: 29.00,
   trial_days: 7,
   return_url: `${APP_URL}/billing/confirm`,
