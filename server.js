@@ -2094,26 +2094,33 @@ app.get('/billing/confirm', async (req, res) => {
     // query-param-only downgrade vector.
     if (!req.session?.shop || req.session.shop !== shop) {
       console.warn(`[Billing] Blocked unauthenticated decline attempt for ${shop}`);
-      return res.status(403).send('Unauthorized: this URL must be accessed from an active StockyShift session');
+      // No-op, NOT an error page: the session lock must never brick a legitimate
+      // decline when the 24h session cookie expired (e.g. merchant kept an iframe
+      // open past expiry). The merchant just lands back on the billing overlay,
+      // and an attacker's crafted downgrade URL is safely ignored either way.
+      return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
     }
     const token = await getToken(shop);
     if (!token) return res.status(401).send('Not installed');
-    const current = await db.get('SELECT billing_status FROM merchants WHERE shop = $1', [shop]);
-    if (current?.billing_status === 'active') {
-      // Fail closed: if we cannot verify, assume the subscription is active
-      // and do NOT downgrade.
-      let hasActiveSub = true;
-      try {
-        const verifyRes = await axios.post(
-          `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-          { query: `{ currentAppInstallation { activeSubscriptions { id } } }` },
-          { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
-        );
-        hasActiveSub = (verifyRes.data?.data?.currentAppInstallation?.activeSubscriptions || []).length > 0;
-      } catch { /* verification failed — leave hasActiveSub = true */ }
-      if (hasActiveSub) {
-        return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
-      }
+    // Never downgrade a merchant who still has active OR trialing subs in
+    // Shopify, regardless of what the local billing_status says. This covers
+    // both 'active' (paying a sub) and 'trial' (mid trial) merchants — an
+    // attacker with a forged decline URL must not be able to shut down a
+    // paying or trialing merchant. Fail closed: if the verification call fails,
+    // assume the subscription is still active and do NOT downgrade.
+    let hasLiveSub = true;
+    try {
+      const verifyRes = await axios.post(
+        `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+        { query: `{ currentAppInstallation { activeSubscriptions { id status } } }` },
+        { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
+      );
+      const subs = verifyRes.data?.data?.currentAppInstallation?.activeSubscriptions || [];
+      const st = s => String(s.status).toUpperCase();
+      hasLiveSub = subs.some(s => st(s) === 'ACTIVE' || st(s) === 'TRIALING');
+    } catch { /* verification failed — leave hasLiveSub = true */ }
+    if (hasLiveSub) {
+      return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
     }
     await db.run(`UPDATE merchants SET billing_status = 'declined' WHERE shop = $1`, [shop]);
     return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift?billing=declined`);
