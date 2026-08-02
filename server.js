@@ -409,10 +409,12 @@ app.get('/auth/callback', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (re
         is_active = 1,
         uninstalled_at = NULL,
         billing_status = CASE
+          WHEN ${DEV_SHOW_BILLING} THEN 'pending'
           WHEN trial_used = 0 AND billing_status NOT IN ('active') THEN 'pending'
           ELSE billing_status
         END,
         trial_ends_at = CASE
+          WHEN ${DEV_SHOW_BILLING} THEN NULL
           WHEN trial_used = 0 AND billing_status NOT IN ('active') THEN NULL
           ELSE trial_ends_at
         END
@@ -425,7 +427,15 @@ app.get('/auth/callback', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (re
     // Reinstalls on dev stores: the reinstall unmark listenwebhook sets trial_used=0
     // but sometimes the merchant row keeps the old trial flag. If billing_status is
     // 'pending' (fresh install or reinstall on dev store), always run the heal check.
-    if (merchant && (merchant.billing_status === 'pending' || merchant.billing_status === 'trial')) {
+    //
+    // DEV_SHOW_BILLING: testing-only. When active, DEV_STORES SHOULD NOT be
+    // auto-healed because the whole point is to exercise the REAL App Pricing
+    // flow. The store stays 'pending' (forced by the upsert above) so the
+    // dashboard overlay shows and /api/billing/create returns Shopify's real
+    // confirmation URL. Heal-skipping also protects against a stale test
+    // subscription from an earlier test charge re-latching this store to
+    // 'trial' without the user ever seeing the checkout.
+    if (!DEV_SHOW_BILLING && merchant && (merchant.billing_status === 'pending' || merchant.billing_status === 'trial')) {
       // First: check shop plan type. Dev/affiliate/staff stores bypass billing
       // entirely — set them as 'trial' with no Shopify charge ID. Production
       // stores get the App Pricing subscription lookup below.
