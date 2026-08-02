@@ -546,6 +546,7 @@ app.get('/api/config', (req, res) => {
   res.json({
     api_key: SHOPIFY_API_KEY,
     billing_test_mode: process.env.BILLING_TEST_MODE === 'true',
+    dev_show_billing: DEV_SHOW_BILLING,
   });
 });
 
