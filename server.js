@@ -1868,38 +1868,15 @@ app.post('/api/billing/create', async (req, res) => {
 
   console.log(`[Billing Debug] ${shop} token present, length=${token.length}, trying App Pricing lookup`);
 
-  // DEV STORE SHORTCUT: Shopify Partner dev stores (and trial stores) get
-  // the app for free — no charge is ever created on them. The "Free for
-  // partners and developers" toggle in App Pricing means Shopify auto-activates
-  // the plan with no charge record. Trying to create a charge on a dev store
-  // fails with "Invalid API key or access token" (Shopify rejects the mutation
-  // because the dev store is exempt from billing). Detect them by querying
-  // shop details: if plan.partnerType is "affiliate" or "staff", skip billing
-  // entirely and activate locally. This is the standard Shopify pattern.
-  if (shop.endsWith('.myshopify.com')) {
-    try {
-      const shopInfo = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-        query: `{ shop { plan { partnerType } myshopifyDomain } }`,
-      }, {
-        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
-        timeout: 8000,
-      });
-      const partnerType = shopInfo.data?.data?.shop?.plan?.partnerType;
-      console.log(`[Billing Debug] ${shop} partnerType=${partnerType}`);
-      // affiliate = dev store, staff = Shopify staff store, plus a few others
-      if (['affiliate', 'staff', 'shopify_plus_partner', 'partner_test'].includes(partnerType)) {
-        const trialEnd = new Date();
-        trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
-        await db.run(`
-          UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, trial_used = 1
-          WHERE shop = $2
-        `, [trialEnd.toISOString(), shop]);
-        console.log(`[Billing] ${shop} is a dev store (${partnerType}) — activated with ${BILLING_PLAN.trial_days}-day trial, no charge created`);
-        return res.json({ confirmation_url: `https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift` });
-      }
-    } catch (err) {
-      console.warn(`[Billing] ${shop} dev store detection failed: ${err.message} — falling through to charge creation`);
-    }
+  // DEV STORE SHORTCUT — DISABLED: uncomment when testing billing flows.
+  // Dev stores are exempt from Shopify charges; enabling this auto-activates
+  // trial locally so the dashboard loads without the overlay. But for testing
+  // the actual billing approval page that REAL merchants will see, keep this
+  // off — let createCharge run and show the approval URL.
+  // To re-enable: remove the "if (false)" guard below.
+  if (false) {
+    // Production deployment: skip dev stores locally but let the else-block
+    // below try App Pricing healing for production stores on this path.
   }
 
   // Shopify App Pricing: if the merchant already picked a plan on the App
