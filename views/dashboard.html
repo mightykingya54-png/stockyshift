@@ -1225,6 +1225,7 @@
               <tr><td style="padding:8px 0;color:#666">Status</td><td><strong>${esc(statusLabel)}</strong></td></tr>
             </table>
             ${statusDetail}
+            <p style="color:#999;font-size:12px;margin-top:12px;font-family:monospace">DEV_SHOW_BILLING=${billing.dev_show_billing ? 'ON' : 'off'} · status=${esc(billing.status)} · trialDaysLeft=${billing.trial_days_left}</p>
             <div class="btn-row" style="margin-top:16px">
               ${manageBtn}
             </div>

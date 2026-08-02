@@ -1968,6 +1968,8 @@ app.get('/api/billing/status', async (req, res) => {
     trial_days_left: trialDaysLeft,
     plan: BILLING_PLAN.name,
     price: BILLING_PLAN.price,
+    dev_show_billing: DEV_SHOW_BILLING,
+    oauth_trial_heal: merchant.trial_heal_note || null,
   });
 });
 
