@@ -803,15 +803,15 @@ const SYNC_PRODUCTS_QUERY = `
                   unitCost {
                     amount
                   }
-                  # NOTE: Limited on purpose to the first locations page.
-                  # Shopify caps prod in continuity: inventoryLevels per item
-                  # can return up to 250 per connection page. We bump the limit
-                  # from the old 10 to 250 (the connection max) so merchants
-                  # with many locations get complete counts in one shot. The
-                  # residual edge: a merchant with MORE than 250 locations
-                  # (rare — Shopify caps most plans far lower) would still see
-                  # partial counts. Accepted v1 limitation.
-                  inventoryLevels(first: 250) {
+                  # NOTE: Fixed at first field pages (10 per inventoryItem) to stay under
+                  # Shopify's GraphQL query cost budget. Bumping this to 250
+                  # multiplied query cost across every product × variant and
+                  # broke sync entirely for many stores ("query cost / too
+                  # expensive" errors). Multi-location completeness for 11+
+                  # locations remains a documented v1 limitation — the correct
+                  # fix is a separate location pagination pass, not inflating this
+                  # nested connection.
+                  inventoryLevels(first: 10) {
                     edges {
                       node {
                         quantities(names: ["available"]) {
@@ -853,13 +853,13 @@ async function runProductSync(shop, token) {
     let hasNextPage = true;
     let after = null;
     let pageCount = 0;
-    const MAX_PAGES = 200; // 250 per page × 200 = 50,000 variants max per sync
+    const MAX_PAGES = 200; // 80 per page × 200 = 16,000 variants max per sync (cost-safe)
 
     while (hasNextPage && pageCount < MAX_PAGES) {
       pageCount++;
       const gqlRes = await axios.post(
         `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-        { query: SYNC_PRODUCTS_QUERY, variables: { first: 250, after } },
+        { query: SYNC_PRODUCTS_QUERY, variables: { first: 80, after } },
         { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 30000 }
       );
 
