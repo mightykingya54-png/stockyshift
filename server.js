@@ -19,6 +19,36 @@ const SessionStore = new SqliteStore({
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ─── Rate limiting (simple in-memory fixed-window) ────────────────────────
+// Protects /auth and /auth/callback from oauth_states table flooding (an
+// attacker hitting /auth?shop=x repeatedly grows the oauth_states table faster
+// than the 15-min sweep can delete). Single-process Render (WEB_CONCURRENCY=1)
+// makes in-memory limiting safe. If scaled to multiple workers later, move this
+// to a shared store (Redis / SQLite).
+const rateBuckets = new Map();
+function rateLimit({ windowMs = 60 * 1000, max = 20 } = {}) {
+  return (req, res, next) => {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || 'unknown';
+    const now = Date.now();
+    const bucket = rateBuckets.get(ip);
+    if (!bucket || bucket.resetAt <= now) {
+      // Fresh bucket (this IP may legitimately hit /auth several times across
+      // retries/reloads — 20/min is generous while blocking floods)
+      rateBuckets.set(ip, { count: 1, resetAt: now + windowMs });
+      if (rateBuckets.size > 10000) { // prune old buckets occasionally
+        for (const [k, b] of rateBuckets) if (b.resetAt <= now) rateBuckets.delete(k);
+      }
+      return next();
+    }
+    bucket.count += 1;
+    if (bucket.count > max) {
+      res.set('Retry-After', String(Math.ceil((bucket.resetAt - now) / 1000)));
+      return res.status(429).json({ error: 'Too many requests — please try again shortly.' });
+    }
+    next();
+  };
+}
+
 // ─── Async error safety net (Express 4) ───────────────────────────────────
 // Express 4 does NOT catch rejected promises from async route handlers —
 // a DB error in a route without try/catch becomes an unhandledRejection,
@@ -279,7 +309,7 @@ const SCOPES = process.env.SCOPES || 'write_inventory,read_inventory,read_produc
 const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 
 // Step 1: Redirect merchant to Shopify authorization
-app.get('/auth', async (req, res) => {
+app.get('/auth', rateLimit({ windowMs: 60 * 1000, max: 20 }), async (req, res) => {
   let { shop } = req.query;
   if (!shop) return res.status(400).send('Missing shop parameter');
   shop = String(shop).toLowerCase(); // Shopify normalizes to lowercase — store canonical form
@@ -304,7 +334,7 @@ app.get('/auth', async (req, res) => {
 });
 
 // Step 2: Handle OAuth callback
-app.get('/auth/callback', async (req, res) => {
+app.get('/auth/callback', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (req, res) => {
   const { code, state } = req.query;
   const shop = String(req.query.shop || '').toLowerCase();
 
@@ -773,9 +803,15 @@ const SYNC_PRODUCTS_QUERY = `
                   unitCost {
                     amount
                   }
-                  # NOTE: Limited to first 10 locations. Merchants with 11+ locations
-                  # will get incomplete inventory counts. Future fix: paginate all locations.
-                  inventoryLevels(first: 10) {
+                  # NOTE: Limited on purpose to the first locations page.
+                  # Shopify caps prod in continuity: inventoryLevels per item
+                  # can return up to 250 per connection page. We bump the limit
+                  # from the old 10 to 250 (the connection max) so merchants
+                  # with many locations get complete counts in one shot. The
+                  # residual edge: a merchant with MORE than 250 locations
+                  # (rare — Shopify caps most plans far lower) would still see
+                  # partial counts. Accepted v1 limitation.
+                  inventoryLevels(first: 250) {
                     edges {
                       node {
                         quantities(names: ["available"]) {
@@ -817,13 +853,13 @@ async function runProductSync(shop, token) {
     let hasNextPage = true;
     let after = null;
     let pageCount = 0;
-    const MAX_PAGES = 50; // 80 per page × 50 = 4,000 variants max per sync
+    const MAX_PAGES = 200; // 250 per page × 200 = 50,000 variants max per sync
 
     while (hasNextPage && pageCount < MAX_PAGES) {
       pageCount++;
       const gqlRes = await axios.post(
         `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-        { query: SYNC_PRODUCTS_QUERY, variables: { first: 80, after } },
+        { query: SYNC_PRODUCTS_QUERY, variables: { first: 250, after } },
         { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 30000 }
       );
 
@@ -999,6 +1035,37 @@ app.get('/api/products', async (req, res) => {
   `, [shop]);
 
   res.json(products);
+});
+
+// Export products as CSV (for migration/manual backup workflows)
+app.get('/api/products/export', async (req, res) => {
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
+
+  const products = await db.all(`
+    SELECT p.title, p.sku, p.current_stock, p.reorder_point, COALESCE(p.unit_cost, 0) AS unit_cost,
+           COALESCE(v.name, '') AS vendor_name
+    FROM products p
+    LEFT JOIN vendors v ON p.preferred_vendor_id = v.id
+    WHERE p.shop = $1 AND p.is_active = 1
+    ORDER BY p.title
+  `, [shop]);
+
+  // Escape CSV fields: quote if they contain comma, quote, or newline
+  const esc = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = ['title', 'sku', 'current_stock', 'reorder_point', 'unit_cost', 'vendor_name'];
+  const lines = [header.map(esc).join(',')];
+  for (const p of products) {
+    lines.push([p.title, p.sku, p.current_stock, p.reorder_point, p.unit_cost, p.vendor_name].map(esc).join(','));
+  }
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="stockyshift-products-${shop.replace(/[^a-z0-9]/gi, '')}.csv"`);
+  res.send('\uFEFF' + lines.join('\r\n')); // BOM so Excel opens UTF-8 correctly
 });
 
 // Update reorder point for a product
@@ -1621,7 +1688,35 @@ app.get('/api/purchase-orders', async (req, res) => {
   res.json(pos);
 });
 
-// Get single PO with line items
+// Export purchase orders as CSV
+app.get('/api/purchase-orders/export', async (req, res) => {
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
+
+  const pos = await db.all(`
+    SELECT po.po_number, po.status, po.total, po.created_at, po.emailed_at, po.received_at,
+           po.notes, v.name as vendor_name, v.email as vendor_email
+    FROM purchase_orders po
+    JOIN vendors v ON po.vendor_id = v.id
+    WHERE po.shop = $1
+    ORDER BY po.created_at DESC
+  `, [shop]);
+
+  const esc = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = ['po_number', 'vendor_name', 'vendor_email', 'status', 'total', 'created_at', 'emailed_at', 'received_at', 'notes'];
+  const lines = [header.map(esc).join(',')];
+  for (const p of pos) {
+    lines.push([p.po_number, p.vendor_name, p.vendor_email, p.status, p.total, p.created_at, p.emailed_at, p.received_at, p.notes].map(esc).join(','));
+  }
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="stockyshift-pos-${shop.replace(/[^a-z0-9]/gi, '')}.csv"`);
+  res.send('\uFEFF' + lines.join('\r\n')); // BOM for Excel
+});
 app.get('/api/purchase-orders/:id', async (req, res) => {
   const { id } = req.params;
   const shop = requireShop(req, res);
@@ -1988,6 +2083,19 @@ app.get('/billing/confirm', async (req, res) => {
   // that actually have the app installed, and never flip an actively paying
   // merchant to 'declined' on query params alone — verify with Shopify first.
   if (!charge_id && !subscription_id) {
+    // SECURITY (audit finding #1): this GET bears no subscription identifiers,
+    // which means "merchant declined." It must only be honored for a merchant
+    // who actually walked through the app's billing flow (their browser holds
+    // the app session cookie for this shop). An attacker who crafts
+    // /billing/confirm?shop=victim.myshopify.com with no valid session must
+    // NOT be able to flip a pending/trial merchant to 'declined' (which would
+    // lock the merchant out). Requiring req.session.shop === shop keeps the
+    // legitimate decline redirect working (same browser) while blocking the
+    // query-param-only downgrade vector.
+    if (!req.session?.shop || req.session.shop !== shop) {
+      console.warn(`[Billing] Blocked unauthenticated decline attempt for ${shop}`);
+      return res.status(403).send('Unauthorized: this URL must be accessed from an active StockyShift session');
+    }
     const token = await getToken(shop);
     if (!token) return res.status(401).send('Not installed');
     const current = await db.get('SELECT billing_status FROM merchants WHERE shop = $1', [shop]);

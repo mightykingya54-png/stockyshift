@@ -380,6 +380,30 @@
   </div><!-- /appContent -->
 
   <script>
+    // ─── Global safety net + helpers ──────────────────────────────
+    // Catch ANY unhandled promise rejection and surface a toast instead of
+    // leaving the merchant staring at a silent dead UI. (Every await in the
+    // app should be in its own try/catch, but this catches the ones that slip
+    // through — a silent failure is the worst UX.)
+    // Only shows when the toast system exists yet (runs after DOMContentLoaded).
+    window.addEventListener('unhandledrejection', (e) => {
+      const msg = e?.reason?.message || 'Unknown error';
+      console.error('[Unhandled rejection]', e?.reason);
+      try {
+        if (typeof showToast === 'function') showToast('Unexpected error: ' + msg, 'error');
+      } catch (_) { /* toast may not exist yet */ }
+    });
+
+    // Small debounce helper — used by the multi-PO search so we don't refilter
+    // 4K+ rows on every keystroke.
+    function debounce(fn, wait = 150) {
+      let t;
+      return function (...args) {
+        clearTimeout(t);
+        t = setTimeout(() => fn.apply(this, args), wait);
+      };
+    }
+
     const urlParams = new URLSearchParams(window.location.search);
     const shop = urlParams.get('shop');
     document.getElementById('shopName').textContent = shop || '';
@@ -687,7 +711,10 @@
 
       if (!res.ok) {
         let detail = `HTTP ${res.status}`;
-        try { const body = await res.json(); detail = String(body.stack || body.detail || body.error || body.message || detail); } catch (_) {}
+        // NOTE: deliberately does NOT include body.stack — raw server stack
+        // traces are developer-only details and reading one to a merchant in
+        // a toast is alienating. detail is used for tests/diagnostics.
+        try { const body = await res.json(); detail = String(body.error || body.message || detail); } catch (_) {}
         throw new Error(detail);
       }
       return res.json();
@@ -931,6 +958,7 @@
 
     function showAddVendor() {
       const modal = document.getElementById('modalContent');
+      modal.className = 'modal'; // reset — prevents earlier wide/flex class leaking (audit finding 2.1)
       modal.innerHTML = `
         <h2>Add Vendor</h2>
         <label>Vendor Name</label>
@@ -1260,7 +1288,10 @@
           updatePOMultiSummary();
         });
       });
-      modal.querySelector('#poSearch').addEventListener('input', filterPOMulti);
+      modal.querySelector('#poSearch').addEventListener('input', debounce(filterPOMulti, 150));
+
+      // One place so we can define the debounce helper once (below), then use it
+      // both here and in any future filter without re-implementing timing.
       updatePOMultiSummary();
     }
 
