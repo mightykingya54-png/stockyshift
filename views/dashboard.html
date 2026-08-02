@@ -719,7 +719,14 @@
         // NOTE: deliberately does NOT include body.stack — raw server stack
         // traces are developer-only details and reading one to a merchant in
         // a toast is alienating. detail is used for tests/diagnostics.
-        try { const body = await res.json(); detail = String(body.error || body.message || detail); } catch (_) {}
+        // Prefer body.detail (the real server-side cause, e.g. the Shopify
+        // GraphQL error) over body.error (which is often just a generic label
+        // like "Sync failed"). Without this, diagnosing a failing sync shows
+        // only "Sync failed" and hides the underlying Shopify error.
+        try {
+          const body = await res.json();
+          detail = String(body.detail || body.error || body.message || detail);
+        } catch (_) {}
         throw new Error(detail);
       }
       return res.json();
