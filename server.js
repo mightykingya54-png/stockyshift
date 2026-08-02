@@ -389,8 +389,11 @@ app.get('/auth/callback', async (req, res) => {
     // Heal billing status for App Pricing installs: dev stores get auto-activated
     // (no charge), and production stores may have an App Pricing subscription
     // created automatically when they pick a plan on the install screen.
-    const merchant = await db.get('SELECT trial_used FROM merchants WHERE shop = $1', [shop]);
-    if (merchant && !merchant.trial_used) {
+    const merchant = await db.get('SELECT trial_used, billing_status FROM merchants WHERE shop = $1', [shop]);
+    // Reinstalls on dev stores: the reinstall unmark listenwebhook sets trial_used=0
+    // but sometimes the merchant row keeps the old trial flag. If billing_status is
+    // 'pending' (fresh install or reinstall on dev store), always run the heal check.
+    if (merchant && (merchant.billing_status === 'pending' || merchant.billing_status === 'trial')) {
       // First: check shop plan type. Dev/affiliate/staff stores bypass billing
       // entirely — set them as 'trial' with no Shopify charge ID. Production
       // stores get the App Pricing subscription lookup below.
@@ -1868,23 +1871,16 @@ app.post('/api/billing/create', async (req, res) => {
 
   console.log(`[Billing Debug] ${shop} token present, length=${token.length}, trying App Pricing lookup`);
 
-  // DEV STORE SHORTCUT — DISABLED: uncomment when testing billing flows.
-  // Dev stores are exempt from Shopify charges; enabling this auto-activates
-  // trial locally so the dashboard loads without the overlay. But for testing
-  // the actual billing approval page that REAL merchants will see, keep this
-  // off — let createCharge run and show the approval URL.
-  // To re-enable: remove the "if (false)" guard below.
-  if (false) {
-    // Production deployment: skip dev stores locally but let the else-block
-    // below try App Pricing healing for production stores on this path.
-  }
+// Remove the disabled dev store block entirely — replace with a simple if-check
+  // inside the App Pricing healing block below. The healing block runs for 'pending'
+  // OR 'trial' merchants (dev stores that were reinstalled).
 
   // Shopify App Pricing: if the merchant already picked a plan on the App
   // Pricing screen, Shopify auto-creates the subscription. Query it live
   // and heal the local status instead of trying to create a duplicate
   // charge (which Shopify rejects, causing the "Session expired" error).
   const merchant = await db.get('SELECT billing_status, trial_used FROM merchants WHERE shop = $1', [shop]);
-  if (merchant && merchant.billing_status === 'pending') {
+  if (merchant && (merchant.billing_status === 'pending' || merchant.billing_status === 'trial')) {
     try {
       const gqlRes = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
         query: `{
