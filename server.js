@@ -787,6 +787,15 @@ async function getToken(shop) {
 }
 
 // GraphQL query for syncing products with variants and inventory (no REST API)
+//
+// NOTE on inventoryLevels(first: 10): keep the page size at 10 per inventory
+// item to stay under Shopify's GraphQL query cost budget. Bumping it to 250
+// multiplied query cost across every product x variant and broke sync for many
+// stores with query-cost errors. Multi-location completeness for 11+ locations
+// remains a documented v1 limitation; the correct fix is a separate location
+// pagination pass, not inflating this nested connection. (These notes are
+// deliberately JS comments - not GraphQL # comments - because Shopify's
+// parser rejects certain characters inside inline # comments.)
 const SYNC_PRODUCTS_QUERY = `
   query($first: Int!, $after: String) {
     products(first: $first, after: $after) {
@@ -805,14 +814,6 @@ const SYNC_PRODUCTS_QUERY = `
                   unitCost {
                     amount
                   }
-                  # NOTE: Fixed at first field pages (10 per inventoryItem) to stay under
-                  # Shopify's GraphQL query cost budget. Bumping this to 250
-                  # multiplied query cost across every product × variant and
-                  # broke sync entirely for many stores ("query cost / too
-                  # expensive" errors). Multi-location completeness for 11+
-                  # locations remains a documented v1 limitation — the correct
-                  # fix is a separate location pagination pass, not inflating this
-                  # nested connection.
                   inventoryLevels(first: 10) {
                     edges {
                       node {
