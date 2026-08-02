@@ -340,6 +340,7 @@
       <button class="tab" data-tab="products" role="tab" id="tab-btn-products" aria-controls="tab-products" aria-selected="false">📦 Products</button>
       <button class="tab" data-tab="vendors" role="tab" id="tab-btn-vendors" aria-controls="tab-vendors" aria-selected="false">🏢 Vendors</button>
       <button class="tab" data-tab="orders" role="tab" id="tab-btn-orders" aria-controls="tab-orders" aria-selected="false">📄 Purchase Orders</button>
+      <button class="tab" data-tab="settings" role="tab" id="tab-btn-settings" aria-controls="tab-settings" aria-selected="false">⚙ Settings</button>
     </div>
 
     <div class="loading" id="initialLoading" style="text-align:center;padding:60px 20px;color:#666;font-size:15px;">
@@ -359,6 +360,9 @@
 
     <!-- Tab: Purchase Orders -->
     <div id="tab-orders" class="tab-content hidden" role="tabpanel" aria-labelledby="tab-btn-orders"></div>
+
+    <!-- Tab: Settings -->
+    <div id="tab-settings" class="tab-content hidden" role="tabpanel" aria-labelledby="tab-btn-settings"></div>
   </div>
 
   <!-- Modal -->
@@ -611,6 +615,7 @@
       if (name === 'products') loadProducts();
       if (name === 'vendors') loadVendors();
       if (name === 'orders') loadOrders();
+      if (name === 'settings') loadSettings();
     }
 
     // ─── Loading state ──────────────────────────────────────────────
@@ -1168,6 +1173,100 @@
         document.getElementById('tab-orders').innerHTML = html;
       } catch (e) {
         document.getElementById('tab-orders').innerHTML = `<div class="error">Failed to load POs</div>`;
+      }
+    }
+
+    // ─── Settings ────────────────────────────────────────────────────────
+
+    async function loadSettings() {
+      try {
+        const billing = await api(`/api/billing/status?shop=${shop}`);
+        const statusLabel = {
+          'active': 'Active',
+          'trial': 'Trial',
+          'pending': 'Trial not started',
+          'declined': 'Declined',
+          'cancelled': 'Cancelled',
+          'expired': 'Expired',
+          'frozen': 'Frozen',
+        }[billing.status] || billing.status.charAt(0).toUpperCase() + billing.status.slice(1);
+
+        let statusDetail = '';
+        if (billing.status === 'trial' && billing.trial_days_left > 0) {
+          statusDetail = `<p style="color:#666;margin:4px 0 0 0">${billing.trial_days_left} day${billing.trial_days_left === 1 ? '' : 's'} left in your trial.</p>`;
+        } else if (billing.status === 'active') {
+          statusDetail = `<p style="color:#666;margin:4px 0 0 0">Your subscription is active. You will be billed through Shopify.</p>`;
+        } else if (billing.status === 'cancelled') {
+          statusDetail = `<p style="color:#666;margin:4px 0 0 0">Your subscription is cancelled. Start a new trial to continue using StockyShift.</p>`;
+        }
+
+        const showManage = billing.status === 'active' || billing.status === 'trial';
+        const manageBtn = showManage
+          ? `<button class="btn btn-outline" onclick="openBillingPortal()" style="margin-right:6px">Manage Subscription</button>
+             <button class="btn btn-sm" style="background:#fee2e2;color:#dc2626;border:none" onclick="confirmCancelSubscription()">Cancel Subscription</button>`
+          : (billing.status === 'cancelled' || billing.status === 'declined' || billing.status === 'expired' || billing.status === 'pending')
+            ? `<button class="btn btn-primary" onclick="startTrial()">Start Trial</button>`
+            : '';
+
+        document.getElementById('tab-settings').innerHTML = `
+          <div class="card" style="max-width:560px">
+            <h2 style="margin-top:0">⚙ Settings</h2>
+
+            <h3 style="margin-bottom:6px">Subscription</h3>
+            <table style="width:100%;max-width:420px">
+              <tr><td style="padding:8px 0;color:#666">Plan</td><td><strong>${esc(billing.plan)} — $${Number(billing.price).toFixed(2)}/month</strong></td></tr>
+              <tr><td style="padding:8px 0;color:#666">Status</td><td><strong>${esc(statusLabel)}</strong></td></tr>
+            </table>
+            ${statusDetail}
+            <div class="btn-row" style="margin-top:16px">
+              ${manageBtn}
+            </div>
+            <p style="color:#888;font-size:13px;margin-top:16px">Subscriptions are managed securely through Shopify. You can cancel any time — no service fees.</p>
+          </div>
+
+          <div class="card" style="max-width:560px">
+            <h3 style="margin-top:0">Support</h3>
+            <p style="color:#555;margin:0">Questions or feedback? Contact <a href="mailto:support@stockyshift.com">support@stockyshift.com</a>.</p>
+          </div>
+        `;
+      } catch (e) {
+        document.getElementById('tab-settings').innerHTML = `<div class="error">Failed to load settings: ${esc(e.message)}</div>`;
+      }
+    }
+
+    // Open Shopify's billing management portal for this app/store
+    function openBillingPortal() {
+      const adminUrl = `https://admin.shopify.com/store/${shop.replace(/\.myshopify\.com$/i, '').replace(/\./g, '-')}/billing`;
+      // Open the full-page billing dashboard in a new tab (the embedded iframe
+      // cannot navigate the parent admin, and Shopify's billing portal is
+      // outside the app frame). Fall back to top navigation if popups blocked.
+      try {
+        window.open(adminUrl, '_blank', 'noopener');
+      } catch (_) {
+        window.top.location.href = adminUrl;
+      }
+    }
+
+    // Cancel subscription: confirm first (destructive), then a /api/billing/cancel
+    let _billingMutation = null; // simple in-flight guard (prevents double-click)
+    async function confirmCancelSubscription() {
+      const ok = await showConfirm(
+        'Cancel your StockyShift subscription? This will end your paid plan at the end of the current billing period. Products, vendors, and purchase orders stay safe.',
+        'Cancel Subscription'
+      );
+      if (!ok) return;
+      if (_billingMutation) return;
+      _billingMutation = true;
+      showToast('Cancelling subscription...', 'info');
+      try {
+        await api('/api/billing/cancel', { method: 'POST', body: JSON.stringify({ shop }) });
+        showToast('Subscription cancelled', 'success');
+        loadSettings();      // re-render card in 'cancelled' state
+        checkBilling(true);   // refresh overlay + toolbar state
+      } catch (e) {
+        showToast('Failed to cancel: ' + e.message, 'error');
+      } finally {
+        _billingMutation = null;
       }
     }
 
@@ -1753,7 +1852,7 @@
     // Read active tab from URL hash (supports tab persistence on reload)
     function getInitialTab() {
       const hash = window.location.hash.replace('#', '');
-      const validTabs = ['low-stock', 'products', 'vendors', 'orders'];
+      const validTabs = ['low-stock', 'products', 'vendors', 'orders', 'settings'];
       return validTabs.includes(hash) ? hash : 'low-stock';
     }
 

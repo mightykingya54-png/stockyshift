@@ -242,6 +242,8 @@ const BILLING_EXEMPT_PATHS = [
   '/config',
   '/billing/status',
   '/billing/create',
+  '/billing/cancel',
+  '/billing/cancel-pending',
   '/db-health',
   '/debug',
 ];
@@ -2274,6 +2276,79 @@ app.post('/api/billing/cancel-pending', async (req, res) => {
   } catch (err) {
     console.error('[Billing] Cancel error:', err.response?.data || err.message);
     res.status(500).json({ error: 'Failed to cancel subscriptions' });
+  }
+});
+
+// Cancel an ACTIVE subscription (full cancellation) from the Settings tab.
+// Also used to let a merchant cancel directly instead of waiting for Shopify's
+// subscriptions_update webhook (which fires asynchronously). Exempt from the
+// billing middleware (BILLING_EXEMPT_PATHS) so a 'pending'/'trial' merchant can
+// always reach it to clean up a stale subscription they no longer want.
+app.post('/api/billing/cancel', async (req, res) => {
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  const token = await getToken(shop);
+  if (!token) return res.status(401).json({ error: 'Not installed' });
+
+  try {
+    // Find the merchant's current subscription(s).
+    const query = `{ currentAppInstallation { activeSubscriptions { id status } } }`;
+    const result = await axios.post(
+      `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+      { query },
+      { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+    const subs = result.data?.data?.currentAppInstallation?.activeSubscriptions || [];
+
+    const canceled = [];
+    const notCanceled = [];
+    for (const sub of subs) {
+      const st = String(sub.status).toUpperCase();
+      // Only cancel subscriptions that are actually billable/live. A 'PAUSED'
+      // / 'DECLINED' sub is already inactive and canceling it returns a
+      // userError tastefully handled below.
+      if (st === 'ACTIVE' || st === 'TRIALING' || st === 'ACCEPTED' || st === 'PENDING') {
+        try {
+          const cancelRes = await axios.post(
+            `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
+            {
+              query: `mutation appSubscriptionCancel($id: ID!) { appSubscriptionCancel(id: $id) { appSubscription { id status } userErrors { field message } } }`,
+              variables: { id: sub.id },
+            },
+            { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
+          );
+          const errs = cancelRes.data?.data?.appSubscriptionCancel?.userErrors || [];
+          if (errs.length > 0) {
+            notCanceled.push({ id: sub.id, error: errs.map(e => e.message).join('; ') });
+          } else {
+            canceled.push(sub.id.split('/').pop());
+          }
+        } catch (e) {
+          notCanceled.push({ id: sub.id, error: e.message });
+        }
+      }
+    }
+
+    if (notCanceled.length > 0) {
+      // Shopify still holds at least one subscription we could not cancel.
+      // Do NOT flip local status to 'cancelled' while the merchant is still
+      // being billed — that would let them cancel the app while Shopify
+      // keeps charging. Return the error so the toast tells them to retry
+      // (or cancel through Shopify's billing page directly).
+      return res.status(500).json({ error: notCanceled[0].error, canceled, notCanceled });
+    }
+
+    // Reflect locally only now that all attempts succeeded. Keep the same
+    // status vocabulary the subscriptions_update webhook uses ('cancelled')
+    // so the dashboard's status handling stays consistent. shopify_charge_id
+    // is preserved so the webhook's WHERE shopify_charge_id = $4 still
+    // matches if it fires later.
+    await db.run("UPDATE merchants SET billing_status = 'cancelled' WHERE shop = $1", [shop]);
+
+    res.json({ canceled, message: `Canceled ${canceled.length} subscription${canceled.length === 1 ? '' : 's'}` });
+  } catch (err) {
+    console.error('[Billing] Cancel active error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to cancel subscription' });
   }
 });
 
