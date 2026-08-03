@@ -1229,7 +1229,7 @@
             <div class="btn-row" style="margin-top:16px">
               ${manageBtn}
             </div>
-            <p style="color:#888;font-size:13px;margin-top:16px">Subscriptions are managed securely through Shopify. You can cancel any time — no service fees.</p>
+            <p style="color:#888;font-size:13px;margin-top:16px">Subscriptions are managed through Shopify. Use the plan page to switch or cancel any time — no service fees.</p>
           </div>
 
           <div class="card" style="max-width:560px">
@@ -1242,40 +1242,34 @@
       }
     }
 
-    // Open Shopify's billing management portal for this app/store
+    // Open Shopify's plan selection page — with Shopify App Pricing (managed
+    // pricing) there is NO legacy billing portal (…/billing 404s). The plan
+    // page is where merchants view, switch, and cancel their subscription.
     function openBillingPortal() {
-      const adminUrl = `https://admin.shopify.com/store/${shop.replace(/\.myshopify\.com$/i, '').replace(/\./g, '-')}/billing`;
-      // Open the full-page billing dashboard in a new tab (the embedded iframe
-      // cannot navigate the parent admin, and Shopify's billing portal is
-      // outside the app frame). Fall back to top navigation if popups blocked.
+      const storeSlug = shop.replace(/\.myshopify\.com$/i, '').replace(/\./g, '-');
+      const planPage = `https://admin.shopify.com/store/${storeSlug}/charges/stockyshift/pricing_plans`;
+      // Open full-page in a new tab (the embedded iframe cannot navigate the
+      // parent admin, and Shopify's plan page is outside the app frame).
+      // Fall back to top navigation if popups blocked.
       try {
-        window.open(adminUrl, '_blank', 'noopener');
+        window.open(planPage, '_blank', 'noopener');
       } catch (_) {
-        window.top.location.href = adminUrl;
+        window.top.location.href = planPage;
       }
     }
 
-    // Cancel subscription: confirm first (destructive), then a /api/billing/cancel
-    let _billingMutation = null; // simple in-flight guard (prevents double-click)
+    // Cancel subscription: with Shopify App Pricing, apps can't cancel via the
+    // Billing API (appSubscriptionCancel is blocked for managed pricing) —
+    // Shopify handles cancellation on the plan page. Send the merchant there
+    // after a confirm dialog (destructive, so confirm first).
     async function confirmCancelSubscription() {
       const ok = await showConfirm(
-        'Cancel your StockyShift subscription? This will end your paid plan at the end of the current billing period. Products, vendors, and purchase orders stay safe.',
-        'Cancel Subscription'
+        "Cancel your StockyShift subscription? This will end your paid plan at the end of the current billing period. Products, vendors, and purchase orders stay safe. You'll confirm the cancellation on Shopify's plan page.",
+        'Continue'
       );
       if (!ok) return;
-      if (_billingMutation) return;
-      _billingMutation = true;
-      showToast('Cancelling subscription...', 'info');
-      try {
-        await api('/api/billing/cancel', { method: 'POST', body: JSON.stringify({ shop }) });
-        showToast('Subscription cancelled', 'success');
-        loadSettings();      // re-render card in 'cancelled' state
-        checkBilling(true);   // refresh overlay + toolbar state
-      } catch (e) {
-        showToast('Failed to cancel: ' + e.message, 'error');
-      } finally {
-        _billingMutation = null;
-      }
+      openBillingPortal();
+    }
     }
 
     // ─── Create PO ──────────────────────────────────────────────────
