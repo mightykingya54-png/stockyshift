@@ -321,16 +321,17 @@ const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 function sendAuthRedirect(res, targetUrl) {
   const safeUrl = String(targetUrl).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
   res.type('html').send(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f6f6f7;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-    .card{background:#fff;border:1px solid #e3e3e6;border-radius:12px;padding:32px;max-width:380px;text-align:center}
-    h1{font-size:20px;margin:0 0 8px}
-    p{color:#555;font-size:14px;margin:0 0 20px}
-    button{background:#4a6cf7;color:#fff;border:none;border-radius:8px;padding:12px 28px;font-size:15px;font-weight:600;cursor:pointer}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#1a1a2e;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+    .card{background:#23233c;border:1px solid #34345a;border-radius:16px;padding:40px 44px;max-width:400px;text-align:center}
+    h1{font-size:22px;margin:0 0 8px;color:#fff;font-weight:700}
+    p{color:#a0a0b8;font-size:14px;margin:0 0 24px;line-height:1.5}
+    button{background:#4a6cf7;color:#fff;border:none;border-radius:10px;padding:13px 32px;font-size:15px;font-weight:600;cursor:pointer}
     button:hover{background:#3b5de7}
-    .small{color:#999;font-size:12px;margin-top:16px}
+    .small{color:#6b6b88;font-size:12px;margin-top:20px}
+    .small a{color:#8a8aaa}
   </style></head><body><div class="card">
     <h1>StockyShift</h1>
-    <p>Open StockyShift to finish connecting your store.</p>
+    <p>Connect your store to open StockyShift.</p>
     <button id="go">Open StockyShift</button>
     <p class="small">If nothing happens, <a id="lnk" href="#">open in a new tab</a>.</p>
   </div><script>
