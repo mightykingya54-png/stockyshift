@@ -314,20 +314,38 @@ const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 // cross-origin iframe; a plain 302 from the server is followed INSIDE that
 // iframe, and Shopify's own auth pages (admin.shopify.com) refuse to render in
 // a frame — the result is the blank "admin.shopify.com refused to connect."
-// page. This serves a tiny HTML page that navigates the TOP window instead
-// (falling back to a new tab if the browser blocks top access), so the iframe
-// NEVER lands on a Shopify page.
+// page. This serves a tiny HTML page that navigates the TOP window instead.
+// Browsers block cross-origin top navigation without user activation, so the
+// page also renders a button (a click grants the permission) and a fallback
+// link — the iframe can never silently dead-end on a white page.
 function sendAuthRedirect(res, targetUrl) {
   const safeUrl = String(targetUrl).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
-  res.type('html').send(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
+  res.type('html').send(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f6f6f7;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+    .card{background:#fff;border:1px solid #e3e3e6;border-radius:12px;padding:32px;max-width:380px;text-align:center}
+    h1{font-size:20px;margin:0 0 8px}
+    p{color:#555;font-size:14px;margin:0 0 20px}
+    button{background:#4a6cf7;color:#fff;border:none;border-radius:8px;padding:12px 28px;font-size:15px;font-weight:600;cursor:pointer}
+    button:hover{background:#3b5de7}
+    .small{color:#999;font-size:12px;margin-top:16px}
+  </style></head><body><div class="card">
+    <h1>StockyShift</h1>
+    <p>Open StockyShift to finish connecting your store.</p>
+    <button id="go">Open StockyShift</button>
+    <p class="small">If nothing happens, <a id="lnk" href="#">open in a new tab</a>.</p>
+  </div><script>
   (function () {
     var url = ${JSON.stringify(safeUrl)};
-    if (window.top !== window.self) {
+    var navigate = function () {
       try { window.top.location.href = url; }
       catch (e) { window.open(url, '_blank'); }
-    } else {
-      window.location.href = url;
-    }
+    };
+    document.getElementById('go').addEventListener('click', navigate);
+    document.getElementById('lnk').href = url;
+    // Auto-attempt on load — allowed at top level and when the browser
+    // permits cross-origin top navigation; otherwise the button above is
+    // the user-activation path (a click always grants the permission).
+    navigate();
   })();
   <\/script></body></html>`);
 }
