@@ -310,6 +310,28 @@ const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const SCOPES = process.env.SCOPES || 'write_inventory,read_inventory,read_products,read_locations';
 const APP_URL = process.env.SHOPIFY_APP_URL || process.env.APP_URL;
 
+// Iframe-safe auth redirect. Shopify's embedded admin renders the app inside a
+// cross-origin iframe; a plain 302 from the server is followed INSIDE that
+// iframe, and Shopify's own auth pages (admin.shopify.com) refuse to render in
+// a frame — the result is the blank "admin.shopify.com refused to connect."
+// page. This serves a tiny HTML page that navigates the TOP window instead
+// (falling back to a new tab if the browser blocks top access), so the iframe
+// NEVER lands on a Shopify page.
+function sendAuthRedirect(res, targetUrl) {
+  const safeUrl = String(targetUrl).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+  res.type('html').send(`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
+  (function () {
+    var url = ${JSON.stringify(safeUrl)};
+    if (window.top !== window.self) {
+      try { window.top.location.href = url; }
+      catch (e) { window.open(url, '_blank'); }
+    } else {
+      window.location.href = url;
+    }
+  })();
+  <\/script></body></html>`);
+}
+
 // Step 1: Redirect merchant to Shopify authorization
 app.get('/auth', rateLimit({ windowMs: 60 * 1000, max: 20 }), async (req, res) => {
   let { shop } = req.query;
@@ -332,7 +354,11 @@ app.get('/auth', rateLimit({ windowMs: 60 * 1000, max: 20 }), async (req, res) =
     `&redirect_uri=${redirectUri}` +
     `&state=${state}`;
 
-  res.redirect(installUrl);
+  // Iframe-safe: never 302 straight to Shopify's authorize page — if this
+  // route is hit from inside the embedded iframe, a 302 would leave the
+  // iframe on admin.shopify.com's OAuth page, which refuses to render in a
+  // frame ("refused to connect"). The HTML page escapes to the top window.
+  sendAuthRedirect(res, installUrl);
 });
 
 // Step 2: Handle OAuth callback
@@ -583,13 +609,15 @@ app.get('/', async (req, res, next) => {
     // the victim's token (forced re-auth DoS).
     if (reauth === '1' && req.session?.shop === shop) {
       await db.run('UPDATE merchants SET is_active = 0, access_token = \'\' WHERE shop = $1', [shop]);
-      return res.redirect(`/auth?shop=${shop}`);
+      return sendAuthRedirect(res, `${APP_URL}/auth?shop=${encodeURIComponent(shop)}`);
     }
 
     // Check if merchant exists
     const merchant = await db.get('SELECT * FROM merchants WHERE shop = $1 AND is_active = 1', [shop]);
     if (!merchant) {
-      return res.redirect(`/auth?shop=${shop}`);
+      // Iframe-safe: serve an escape page instead of a 302. The embedded
+      // iframe must never navigate to Shopify's auth pages directly.
+      return sendAuthRedirect(res, `${APP_URL}/auth?shop=${encodeURIComponent(shop)}`);
     }
 
     // Force re-auth if merchant has a non-expiring token (no refresh_token) — API 2026-07 rejects them.
@@ -597,7 +625,7 @@ app.get('/', async (req, res, next) => {
     if (!merchant.refresh_token) {
       console.log(`[Auth] ${shop} has non-expiring token, forcing re-auth for API 2026-07 compatibility`);
       await db.run('UPDATE merchants SET is_active = 0, access_token = \'\' WHERE shop = $1', [shop]);
-      return res.redirect(`/auth?shop=${shop}`);
+      return sendAuthRedirect(res, `${APP_URL}/auth?shop=${encodeURIComponent(shop)}`);
     }
 
     // Refresh session shop so subsequent API calls (which use getShop()) don't fail

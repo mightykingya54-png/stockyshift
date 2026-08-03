@@ -81,16 +81,24 @@
     fetch('/api/billing/status?shop=' + encodeURIComponent(shop), {
       signal: AbortSignal.timeout(5000)
     })
-      .then(r => {
+      .then(async r => {
         // Preserve ALL original query params (host, id_token, etc.)
         // so App Bridge can initialize in the dashboard
         const fullQuery = window.location.search;
+        let needsAuth = !r.ok;
         if (r.ok) {
+          // A 200 with status 'not_installed' still needs the install flow —
+          // otherwise we'd bounce back to the app root in a loop.
+          try {
+            needsAuth = (await r.json()).status === 'not_installed';
+          } catch (e) { /* unparseable — assume authenticated */ }
+        }
+        if (needsAuth) {
           // ABSOLUTE URLs only: window.top is admin.shopify.com in embedded
           // mode, so relative paths would resolve against the WRONG origin.
-          goTop(window.location.origin + '/' + fullQuery);
-        } else {
           goTop(window.location.origin + '/auth?shop=' + encodeURIComponent(shop));
+        } else {
+          goTop(window.location.origin + '/' + fullQuery);
         }
       })
       .catch(() => {
