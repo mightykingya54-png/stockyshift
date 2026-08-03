@@ -333,7 +333,7 @@ function sendAuthRedirect(res, targetUrl) {
     <h1>StockyShift</h1>
     <p>Connect your store to open StockyShift.</p>
     <button id="go">Open StockyShift</button>
-    <p class="small">If nothing happens, <a id="lnk" href="#">open in a new tab</a>.</p>
+    <p class="small"><a id="lnk" href="#">Open in a new tab</a></p>
   </div><script>
   (function () {
     var url = ${JSON.stringify(safeUrl)};
