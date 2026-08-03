@@ -1819,6 +1819,11 @@ const BILLING_PLAN = {
   return_url: `${APP_URL}/billing/confirm`,
 };
 
+// App handle — the slug used in admin URLs (…/apps/stockyshift) and the
+// Shopify App Pricing plan-selection page (…/charges/<appHandle>/pricing_plans).
+// Must match the handle in shopify.app.toml / the Partner Dashboard listing.
+const APP_HANDLE = 'stockyshift';
+
 // DEV_SHOW_BILLING=true — testing-only escape hatch. On a dev store the
 // normal OAuth heal auto-activates the 7-day trial (no Shopify charge), so
 // the real App Pricing page is never exercised. When this flag is set, dev
@@ -1844,73 +1849,11 @@ function isBillingActive(merchant) {
   return false;
 }
 
-// GraphQL mutation to create a subscription
-const CREATE_SUBSCRIPTION_MUTATION = `
-  mutation AppSubscriptionCreate($name: String!, $returnUrl: URL!, $trialDays: Int!, $price: Decimal!, $test: Boolean!) {
-    appSubscriptionCreate(
-      name: $name
-      returnUrl: $returnUrl
-      trialDays: $trialDays
-      test: $test
-      lineItems: [{
-        plan: {
-          appRecurringPricingDetails: {
-            price: { amount: $price, currencyCode: USD }
-          }
-        }
-      }]
-    ) {
-      confirmationUrl
-      appSubscription {
-        id
-        status
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
-
-// Create a Shopify billing subscription (GraphQL) and return confirmation URL
-async function createCharge(shop, token) {
-  const response = await axios.post(
-    `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-    {
-      query: CREATE_SUBSCRIPTION_MUTATION,
-      variables: {
-        name: BILLING_PLAN.name,
-        returnUrl: BILLING_PLAN.return_url,
-        trialDays: BILLING_PLAN.trial_days,
-        price: BILLING_PLAN.price,
-        // Test subscriptions: REQUESTED when testing the real App Pricing page
-        // on a dev store (DEV_SHOW_BILLING) or here BILLING_TEST_MODE skips
-        // Shopify entirely. A dev store can't process a real $29 charge, so
-        // test:true is required for the confirmation page to be usable there.
-        test: DEV_SHOW_BILLING || process.env.BILLING_TEST_MODE === 'true',
-      },
-    },
-    { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 15000 }
-  );
-
-  const data = response.data.data?.appSubscriptionCreate;
-  if (data?.userErrors?.length > 0) {
-    const err = data.userErrors.map(e => e.message).join('; ');
-    throw new Error(err);
-  }
-  if (!data?.confirmationUrl) {
-    throw new Error('No confirmation URL returned from Shopify');
-  }
-
-  return {
-    id: data.appSubscription.id,
-    confirmation_url: data.confirmationUrl,
-    status: data.appSubscription.status,
-  };
-}
-
-// Activate is not needed for GraphQL — subscription auto-activates on approval
+// NOTE: The legacy Billing API (appSubscriptionCreate / createCharge) was
+// removed. Shopify App Pricing (managed pricing) BLOCKS that mutation with
+// "Managed Pricing Apps cannot use the Billing API (to create charges)".
+// The only supported upgrade path is redirecting the merchant to the
+// Shopify-hosted plan-selection page (see /api/billing/create).
 
 // Get billing status for the dashboard
 app.get('/api/billing/status', async (req, res) => {
@@ -2032,7 +1975,7 @@ app.post('/api/billing/create', async (req, res) => {
       if (activeSub) {
         const trialEnd = activeSub.remainingTrialDays && activeSub.remainingTrialDays > 0
           ? new Date(Date.now() + activeSub.remainingTrialDays * 86400000).toISOString()
-          : null;
+          : new Date(Date.now() + BILLING_PLAN.trial_days * 86400000).toISOString();
         await db.run(`
           UPDATE merchants SET
             billing_status = 'trial',
@@ -2045,7 +1988,7 @@ app.post('/api/billing/create', async (req, res) => {
         return res.json({ confirmation_url: `https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift` });
       }
     } catch (err) {
-      console.warn(`[Billing] App Pricing lookup failed for ${shop}: ${err.message} — falling back to manual charge`);
+      console.warn(`[Billing] App Pricing lookup failed for ${shop}: ${err.message} — proceeding to plan-selection redirect`);
       console.warn(`[Billing Debug] Failure detail:`, JSON.stringify(err.response?.data || err.message).slice(0, 800));
     }
   }
@@ -2064,10 +2007,16 @@ app.post('/api/billing/create', async (req, res) => {
   }
 
   try {
-    const charge = await createCharge(shop, token);
-    // Store charge ID
-    await db.run('UPDATE merchants SET shopify_charge_id = $1 WHERE shop = $2', [String(charge.id), shop]);
-    res.json({ confirmation_url: charge.confirmation_url });
+    // Shopify App Pricing (managed pricing): the legacy Billing API
+    // (appSubscriptionCreate) is BLOCKED for managed-pricing apps — Shopify
+    // rejects it with "Managed Pricing Apps cannot use the Billing API (to
+    // create charges)". The supported flow is to redirect the merchant to
+    // Shopify's hosted plan-selection page. Shopify creates the subscription
+    // on approval and returns to BILLING_PLAN.return_url with plan_handle +
+    // shop params, which /billing/confirm verifies and heals.
+    const pricingUrl = `https://admin.shopify.com/store/${storeSlug(shop)}/charges/${APP_HANDLE}/pricing_plans`;
+    console.log(`[Billing] ${shop} redirecting to App Pricing plan selection: ${pricingUrl}`);
+    return res.json({ confirmation_url: pricingUrl, app_pricing: true });
   } catch (err) {
     const detail = err.response?.data || err.message;
     const raw = JSON.stringify(detail);
@@ -2113,8 +2062,9 @@ app.get('/billing/confirm', async (req, res) => {
   const shop = String(req.query.shop || req.session?.shop || '').toLowerCase();
   if (!shop) return res.status(400).send('Missing shop parameter — this URL should only be accessed via Shopify billing redirect');
 
-  // Merchant declined billing — mark it explicitly and redirect back into the
-  // admin with the declined flag (dashboard shows the message on the overlay).
+  // No subscription identifiers: "merchant declined" — OR, with Shopify App
+  // Pricing, the return from the plan-selection page (Shopify appends only
+  // plan_handle + shop, no charge_id). Handle both:
   // SECURITY: this GET is unauthenticated (browser redirect from Shopify
   // billing), so it must not be usable as a downgrade vector: only touch shops
   // that actually have the app installed, and never flip an actively paying
@@ -2145,18 +2095,43 @@ app.get('/billing/confirm', async (req, res) => {
     // attacker with a forged decline URL must not be able to shut down a
     // paying or trialing merchant. Fail closed: if the verification call fails,
     // assume the subscription is still active and do NOT downgrade.
-    let hasLiveSub = true;
+    let liveSub = null;
+    let verified = false; // whether the Shopify check completed successfully
     try {
       const verifyRes = await axios.post(
         `https://${shop}/admin/api/${API_VERSION}/graphql.json`,
-        { query: `{ currentAppInstallation { activeSubscriptions { id status } } }` },
+        { query: `{ currentAppInstallation { activeSubscriptions { id status remainingTrialDays } } }` },
         { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }, timeout: 10000 }
       );
       const subs = verifyRes.data?.data?.currentAppInstallation?.activeSubscriptions || [];
       const st = s => String(s.status).toUpperCase();
-      hasLiveSub = subs.some(s => st(s) === 'ACTIVE' || st(s) === 'TRIALING');
-    } catch { /* verification failed — leave hasLiveSub = true */ }
-    if (hasLiveSub) {
+      liveSub = subs.find(s => st(s) === 'ACTIVE' || st(s) === 'TRIALING') || null;
+      verified = true;
+    } catch { /* verification failed — fail closed: never downgrade */ }
+    if (!verified) {
+      // Fail closed: can't confirm the merchant has NO subscription, so don't
+      // mark them declined — just send them back to the dashboard.
+      console.warn(`[Billing] ${shop} confirm verification failed — leaving status unchanged`);
+      return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
+    }
+    if (liveSub) {
+      // App Pricing approval (plan_handle return) or an existing sub — heal the
+      // local row so the dashboard stops showing the paywall: set the charge id,
+      // a trial window from Shopify's remainingTrialDays (fall back to our plan
+      // config), and trial_used. Same normalization as the /api/billing/create
+      // heal block.
+      const trialEnd = liveSub.remainingTrialDays && liveSub.remainingTrialDays > 0
+        ? new Date(Date.now() + liveSub.remainingTrialDays * 86400000).toISOString()
+        : new Date(Date.now() + BILLING_PLAN.trial_days * 86400000).toISOString();
+      await db.run(`
+        UPDATE merchants SET
+          billing_status = 'trial',
+          trial_ends_at = $1,
+          shopify_charge_id = $2,
+          trial_used = 1
+        WHERE shop = $3
+      `, [trialEnd, String(liveSub.id).replace(/^gid:\/\/shopify\/AppSubscription\//, ''), shop]);
+      console.log(`[Billing] ${shop} App Pricing approval detected — healed to trial until ${trialEnd}`);
       return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
     }
     await db.run(`UPDATE merchants SET billing_status = 'declined' WHERE shop = $1`, [shop]);

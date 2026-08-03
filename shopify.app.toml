@@ -2,6 +2,10 @@
 
 client_id = "c6f8088fe21f2043fc863899e6c7ae66"
 name = "StockyShift"
+# App handle — used in admin URLs (…/apps/stockyshift) and the App Pricing
+# plan-selection page (…/charges/stockyshift/pricing_plans). Must match the
+# Partner Dashboard app handle.
+handle = "stockyshift"
 application_url = "https://stockyshift.com"
 embedded = true
 
