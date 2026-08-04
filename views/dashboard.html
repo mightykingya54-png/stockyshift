@@ -1101,20 +1101,18 @@
       return res.json();
     }
 
-    // ─── CSV export (warm signed token; Safari window.open / others iframe) ──
-    const __BUILD = 'ca3bb93'; // shown in Settings; used to verify live build vs cached page
-    // Pattern: (1) the signed token is kept WARM (prefetched on tab load +
-    // refreshed every 30s) so the click handler triggers the download
-    // SYNCHRONOUSLY — Safari drops downloads when an await sits between the
-    // click and the navigation (user activation expires).
-    // (2) Safari ONLY: top-level window.open to the attachment URL in the same
-    // synchronous click task. Safari honors Content-Disposition: attachment
-    // for top-level navigations, downloads the file, and never touches the
-    // visible app. NOTE: do NOT also use an iframe for Safari — Safari renders
-    // text/csv inline inside iframes and paints it over the app (the original
-    // "long text" bug). The two mechanisms must never be mixed per browser.
-    // (3) Edge/Chrome ONLY: hidden iframe to the attachment URL — they honor
-    // the header without rendering, so the app never navigates.
+    // ─── CSV export (warm signed token + hidden iframe attachment URL) ──
+    const __BUILD = 'pending'; // shown in Settings; used to verify live build vs cached page
+    // Documented WebKit behavior (WebKit bug 190351, bug 216918): the
+    // blob+URL.createObjectURL+<a download>+click() path is BROKEN in Safari —
+    // WebKit "tries to load the blob instead of downloading it". That is what
+    // painted the app's own text over the UI (confirmed by DOM trace: an 83KB
+    // text node containing body.textContent appeared 3ms after the blob anchor
+    // click, created by no loaded script). The signal WebKit honors is the
+    // Content-Disposition: attachment header on a real HTTP response
+    // (Playwright webkit test 20089), triggered from an embedded app via a
+    // hidden iframe (Shopify dev forum, July 2026). The signed 60s token is
+    // kept WARM so the click handler never waits on the network.
     let __dlToken = null;
     let __dlTokenExp = 0;
     async function ensureDownloadToken() {
@@ -1126,38 +1124,40 @@
     }
     setInterval(() => { ensureDownloadToken().catch(() => {}); }, 30000);
 
-    // CSV export: fetch the bytes with the authenticated api() client, wrap them
-    // in a Blob typed as application/octet-stream, and trigger via an <a download>
-    // click. application/octet-stream forces every browser — INCLUDING Safari —
-    // to download the file instead of rendering it inline. Safari's old window.open
-    // path (and iframe path) rendered text/csv as a page of text covering the app
-    // because Content-Disposition: attachment is ignored for text/* in browsing
-    // contexts. Blob download never navigates, so the app is never replaced.
+    // Download via hidden iframe → the server's attachment URL. The visible app
+    // iframe never navigates. WebKit sees Content-Disposition: attachment and
+    // downloads (Playwright 20089); even in the worst case of a browser that
+    // ignores the header, the response renders inside a display:none iframe —
+    // it cannot paint over the app. No blob, no createObjectURL, no anchor
+    // click: the exact WebKit-broken path is never used.
     async function downloadCsv(path, filename) {
       const exportBtn = document.activeElement;
       const originalLabel = exportBtn ? exportBtn.textContent : null;
       if (exportBtn) { exportBtn.disabled = true; exportBtn.textContent = 'Exporting...'; }
-      let blobUrl = null;
+      let iframe = null;
+      let removeTimer = null;
       try {
-        // api() attaches the Bearer session token; fetch Response → text (CSV is text).
-        const csvText = await api(path);
-        const csvString = typeof csvText === 'string' ? csvText : String(csvText ?? '');
-        // application/octet-stream = "I don't know what this is" → browser MUST download.
-        // text/csv would let Safari render it inline (the bug this fixes).
-        const blob = new Blob([csvString], { type: 'application/octet-stream' });
-        blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        a.download = filename; // suggests filename; browser downloads, never navigates
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        const token = await ensureDownloadToken();
+        const url = path + (path.includes('?') ? '&' : '?') + 'dl=' + encodeURIComponent(token);
+        iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.setAttribute('aria-hidden', 'true');
+        iframe.addEventListener('load', () => {
+          if (iframe) { iframe.remove(); iframe = null; }
+          if (removeTimer) { clearTimeout(removeTimer); removeTimer = null; }
+        });
+        iframe.src = url;
+        document.body.appendChild(iframe);
+        // Safety net: drop the iframe after the token lifetime even if no load
+        // event fires (Safari attachment downloads may not fire load on the
+        // iframe at all).
+        removeTimer = setTimeout(() => {
+          if (iframe) { iframe.remove(); iframe = null; }
+        }, 15000);
         showToast('Export started — check your downloads', 'success');
       } catch (e) {
         showToast('Export failed: ' + e.message, 'error');
       } finally {
-        // Free the blob URL after the click has been processed by the browser.
-        if (blobUrl) setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
         if (exportBtn) { exportBtn.disabled = false; if (originalLabel) exportBtn.textContent = originalLabel; }
       }
     }
