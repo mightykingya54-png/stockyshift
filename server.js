@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 const cron = require('node-cron');
 const db = require('./db');
-const { generatePO, generateListPDF } = require('./lib/pdf');
+const { generatePO } = require('./lib/pdf');
 const { sendPOEmail } = require('./lib/email');
 // Session store: SQLite (synchronous, persistent file)
 const SqliteStore = require('better-sqlite3-session-store')(session);
@@ -1179,41 +1179,6 @@ app.get('/api/products/export', async (req, res) => {
   res.send('\uFEFF' + lines.join('\r\n')); // BOM so Excel opens UTF-8 correctly
 });
 
-// Export products as PDF (same auth'd download pipeline as the CSV export)
-app.get('/api/products/export-pdf', async (req, res) => {
-  let shop = verifyDownloadToken(req.query.dl);
-  if (!shop) shop = requireShop(req, res);
-  if (!shop) return;
-  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
-
-  const products = await db.all(`
-    SELECT p.title, p.sku, p.current_stock, p.reorder_point, COALESCE(p.unit_cost, 0) AS unit_cost,
-           COALESCE(v.name, '') AS vendor_name
-    FROM products p
-    LEFT JOIN vendors v ON p.preferred_vendor_id = v.id
-    WHERE p.shop = $1 AND p.is_active = 1
-    ORDER BY p.title
-  `, [shop]);
-
-  const buf = await generateListPDF({
-    title: 'Products & Reorder Points',
-    subtitle: `StockyShift · ${shop} · ${new Date().toLocaleDateString()}`,
-    columns: [
-      { label: 'Product', width: 180 },
-      { label: 'SKU', width: 100 },
-      { label: 'Stock', width: 60, align: 'right' },
-      { label: 'Reorder Pt.', width: 70, align: 'right' },
-      { label: 'Unit Cost', width: 80, align: 'right' },
-      { label: 'Vendor', width: 110 },
-    ],
-    rows: products.map(p => [p.title, p.sku || '-', p.current_stock, p.reorder_point, `$${Number(p.unit_cost).toFixed(2)}`, p.vendor_name || '-']),
-  });
-
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="stockyshift-products-${shop.replace(/[^a-z0-9]/gi, '')}.pdf"`);
-  res.send(buf);
-});
-
 // Update reorder point for a product
 app.post('/api/products/reorder-point', async (req, res) => {
   const shop = requireShop(req, res);
@@ -1863,40 +1828,6 @@ app.get('/api/purchase-orders/export', async (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="stockyshift-pos-${shop.replace(/[^a-z0-9]/gi, '')}.csv"`);
   res.send('\uFEFF' + lines.join('\r\n')); // BOM for Excel
-});
-
-// Export purchase orders as PDF (same auth'd download pipeline as the CSV export)
-app.get('/api/purchase-orders/export-pdf', async (req, res) => {
-  let shop = verifyDownloadToken(req.query.dl);
-  if (!shop) shop = requireShop(req, res);
-  if (!shop) return;
-  if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
-
-  const pos = await db.all(`
-    SELECT po.po_number, po.status, po.total, po.created_at, v.name as vendor_name, v.email as vendor_email
-    FROM purchase_orders po
-    JOIN vendors v ON po.vendor_id = v.id
-    WHERE po.shop = $1
-    ORDER BY po.created_at DESC
-  `, [shop]);
-
-  const buf = await generateListPDF({
-    title: 'Purchase Orders',
-    subtitle: `StockyShift · ${shop} · ${new Date().toLocaleDateString()}`,
-    columns: [
-      { label: 'PO #', width: 90 },
-      { label: 'Vendor', width: 150 },
-      { label: 'Email', width: 150 },
-      { label: 'Status', width: 80 },
-      { label: 'Total', width: 70, align: 'right' },
-      { label: 'Created', width: 90 },
-    ],
-    rows: pos.map(p => [p.po_number, p.vendor_name, p.vendor_email || '-', p.status.toUpperCase(), `$${Number(p.total).toFixed(2)}`, new Date(p.created_at).toLocaleDateString()]),
-  });
-
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="stockyshift-pos-${shop.replace(/[^a-z0-9]/gi, '')}.pdf"`);
-  res.send(buf);
 });
 app.get('/api/purchase-orders/:id', async (req, res) => {
   const { id } = req.params;

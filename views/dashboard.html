@@ -894,13 +894,13 @@
 
     // ─── Products ───────────────────────────────────────────────────
 
-    // ─── Export PDF (thin wrappers around the auth'd download helper) ──
+    // ─── Export CSV (thin wrappers around the auth'd download helper) ──
     // Filenames mirror the server's Content-Disposition so saved files are consistent.
     function exportProducts() {
-      downloadCsv(`/api/products/export-pdf?shop=${encodeURIComponent(shop)}`, `stockyshift-products-${shop.replace(/[^a-z0-9]/gi, '')}.pdf`);
+      downloadCsv(`/api/products/export?shop=${encodeURIComponent(shop)}`, `stockyshift-products-${shop.replace(/[^a-z0-9]/gi, '')}.csv`);
     }
     function exportOrders() {
-      downloadCsv(`/api/purchase-orders/export-pdf?shop=${encodeURIComponent(shop)}`, `stockyshift-pos-${shop.replace(/[^a-z0-9]/gi, '')}.pdf`);
+      downloadCsv(`/api/purchase-orders/export?shop=${encodeURIComponent(shop)}`, `stockyshift-pos-${shop.replace(/[^a-z0-9]/gi, '')}.csv`);
     }
 
     async function loadProducts() {
@@ -922,7 +922,7 @@
         let html = `<div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">📦 ${data.length} Products</h2>
-            <button class="btn btn-outline btn-sm" onclick="exportProducts()">⬇ Export PDF</button>
+            <button class="btn btn-outline btn-sm" onclick="exportProducts()">⬇ Export CSV</button>
           </div>
           <table>
           <tr><th>Product</th><th>SKU</th><th>Stock</th><th>Reorder Point</th><th>Vendor</th><th></th></tr>`;
@@ -1152,7 +1152,7 @@
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">📄 Purchase Orders</h2>
             <div>
-              <button class="btn btn-outline btn-sm" onclick="exportOrders()" style="margin-right:6px">⬇ Export PDF</button>
+              <button class="btn btn-outline btn-sm" onclick="exportOrders()" style="margin-right:6px">⬇ Export CSV</button>
               <button class="btn btn-success btn-sm" onclick="showCreatePOMulti()">+ New PO</button>
             </div>
           </div>`;
