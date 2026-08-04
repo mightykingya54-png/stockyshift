@@ -1937,6 +1937,46 @@ async function detectDevStore(shop, token) {
   }
 }
 
+// TEMPORARY debug endpoint (REMOVE before launch): read-only merchant row
+// inspector + live Shopify probe. Only responds when DEBUG_KEY env matches.
+app.get('/api/debug/merchant', async (req, res) => {
+  if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  const shop = String(req.query.shop || '').toLowerCase();
+  if (!shop || !/^[a-z0-9-]+\.myshopify\.com$/.test(shop)) {
+    return res.status(400).json({ error: 'shop required' });
+  }
+  const m = await db.get(
+    'SELECT shop, billing_status, trial_used, is_active, uninstalled_at, trial_ends_at, shopify_charge_id, LENGTH(access_token) AS token_len, expires_at, created_at FROM merchants WHERE shop = $1',
+    [shop]
+  );
+  if (!m) return res.json({ not_found: true });
+  let probe = null;
+  try {
+    const token = await getToken(shop);
+    if (!token) {
+      probe = { token: 'none' };
+    } else {
+      const r = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+        query: `{ shop { plan { partnerType } } currentAppInstallation { activeSubscriptions { id status } } }`,
+      }, {
+        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+        timeout: 8000,
+      });
+      probe = {
+        token: 'ok',
+        partnerType: r.data?.data?.shop?.plan?.partnerType ?? null,
+        subs: (r.data?.data?.currentAppInstallation?.activeSubscriptions || []).map(s => ({ id: s.id, status: s.status })),
+        errors: r.data?.errors || null,
+      };
+    }
+  } catch (e) {
+    probe = { error: e.message };
+  }
+  return res.json({ merchant: m, probe });
+});
+
 app.get('/api/billing/status', async (req, res) => {
   const shop = requireShop(req, res);
   if (!shop) return;
