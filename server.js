@@ -1113,8 +1113,44 @@ app.get('/api/products', async (req, res) => {
 });
 
 // Export products as CSV (for migration/manual backup workflows)
-app.get('/api/products/export', async (req, res) => {
+// ─── CSV export (direct download with short-lived signed token) ────────
+// The old fetch+blob+programmatic-click download trips Safari's download
+// prompts and can leave the app in a weird state. Direct navigation to an
+// attachment URL is reliable in EVERY browser — but the export routes need
+// auth, and a bare <a href> has no Bearer header. So the client first asks
+// for a 60-second HMAC-signed token (still authenticated via the normal
+// session), then navigates to the export URL with ?dl=token. No blob, no
+// iframe gymnastics, no popups.
+app.get('/api/export/token', async (req, res) => {
   const shop = requireShop(req, res);
+  if (!shop) return;
+  const exp = Math.floor(Date.now() / 1000) + 60;
+  const payload = `${shop}:${exp}`;
+  const sig = crypto.createHmac('sha256', process.env.SESSION_SECRET).update(payload).digest('hex');
+  res.json({ token: `${Buffer.from(payload).toString('base64url')}.${sig}` });
+});
+
+// Verify a download token: returns the shop if valid and unexpired, else null.
+function verifyDownloadToken(token) {
+  if (!token) return null;
+  const parts = String(token).split('.');
+  if (parts.length !== 2) return null;
+  const [payloadB64, sig] = parts;
+  let payloadStr;
+  try { payloadStr = Buffer.from(payloadB64, 'base64url').toString(); } catch (_) { return null; }
+  const expected = crypto.createHmac('sha256', process.env.SESSION_SECRET).update(payloadStr).digest('hex');
+  const a = Buffer.from(sig, 'hex');
+  const b = Buffer.from(expected, 'hex');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  const [shop, exp] = payloadStr.split(':');
+  if (!shop || !exp || Number(exp) < Math.floor(Date.now() / 1000)) return null;
+  if (!/^[a-z0-9-]+\.myshopify\.com$/i.test(shop)) return null;
+  return shop;
+}
+
+app.get('/api/products/export', async (req, res) => {
+  let shop = verifyDownloadToken(req.query.dl);
+  if (!shop) shop = requireShop(req, res);
   if (!shop) return;
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 
@@ -1765,7 +1801,8 @@ app.get('/api/purchase-orders', async (req, res) => {
 
 // Export purchase orders as CSV
 app.get('/api/purchase-orders/export', async (req, res) => {
-  const shop = requireShop(req, res);
+  let shop = verifyDownloadToken(req.query.dl);
+  if (!shop) shop = requireShop(req, res);
   if (!shop) return;
   if (!await getToken(shop)) return res.status(401).json({ error: 'Shop not installed' });
 

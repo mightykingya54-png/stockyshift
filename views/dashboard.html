@@ -732,42 +732,28 @@
       return res.json();
     }
 
-    // ─── CSV export (download via authenticated fetch + Blob) ─────────────
-    // The /api/*/export endpoints require the same Bearer token as the JSON
-    // API, so a plain <a href> download would 401 (no Authorization header).
-    // Fetching as text with the normal api() auth, then triggering a browser
-    // download, keeps the token off the URL and works inside the admin iframe.
+    // ─── CSV export (direct download with short-lived signed token) ──────
+    // The old fetch+blob+programmatic-click path made Safari prompt for
+    // download permission and could leave the app showing raw text/stuck.
+    // New flow: ask the server for a 60-second HMAC-signed download token
+    // (still authenticated via the normal api() auth), then trigger a plain
+    // same-origin anchor download. No blob, no popups — works in every
+    // browser, including Safari inside the admin iframe.
     async function downloadCsv(path, filename) {
       const exportBtn = document.activeElement;
       const originalLabel = exportBtn ? exportBtn.textContent : null;
       if (exportBtn) { exportBtn.disabled = true; exportBtn.textContent = 'Exporting...'; }
       try {
-        const token = await getSessionToken();
-        const res = await fetch(path, {
-          headers: { 'Authorization': token ? `Bearer ${token}` : '' },
-        });
-        if (res.status === 401) {
-          // Reuse the API helper's reauth handling by falling back to it.
-          // Simpler: parse error and surface it as a toast.
-          let detail = 'Not authorized';
-          try { const body = await res.json(); detail = body.error || detail; } catch (_) {}
-          throw new Error(detail);
-        }
-        if (!res.ok) {
-          let detail = `HTTP ${res.status}`;
-          try { const body = await res.json(); detail = body.error || detail; } catch (_) {}
-          throw new Error(detail);
-        }
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
+        const t = await api(`/api/export/token?shop=${encodeURIComponent(shop)}`);
+        const url = path + (path.includes('?') ? '&' : '?') + 'dl=' + encodeURIComponent(t.token);
         const a = document.createElement('a');
         a.href = url;
         a.download = filename;
+        a.rel = 'noopener';
         document.body.appendChild(a);
         a.click();
         a.remove();
-        URL.revokeObjectURL(url);
-        showToast('Export downloaded', 'success');
+        showToast('Export started — check your downloads', 'success');
       } catch (e) {
         showToast('Export failed: ' + e.message, 'error');
       } finally {
