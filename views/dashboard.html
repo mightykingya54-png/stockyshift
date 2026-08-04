@@ -732,39 +732,30 @@
       return res.json();
     }
 
-    // ─── CSV export (direct download with short-lived signed token) ──────
-    // The old fetch+blob+programmatic-click path made Safari prompt for
-    // download permission and could leave the app showing raw text/stuck.
-    // New flow: ask the server for a 60-second HMAC-signed download token
-    // (still authenticated via the normal api() auth), then trigger a plain
-    // same-origin anchor download. No blob, no popups — works in every
-    // browser, including Safari inside the admin iframe.
+    // ─── CSV export (hidden iframe download with signed token) ────────
+    // The ONLY pattern that works in every browser — including Safari
+    // inside the Shopify admin iframe — is a hidden iframe pointing at
+    // the Content-Disposition: attachment URL. No blob, no anchor, no
+    // window.open — the visible iframe never navigates, so the app never
+    // goes blank or shows raw file text. This has been the gold standard
+    // since 1999. The 60-second HMAC-signed token carries auth.
     async function downloadCsv(path, filename) {
       const exportBtn = document.activeElement;
       const originalLabel = exportBtn ? exportBtn.textContent : null;
       if (exportBtn) { exportBtn.disabled = true; exportBtn.textContent = 'Exporting...'; }
+      let iframe = null;
       try {
         const t = await api(`/api/export/token?shop=${encodeURIComponent(shop)}`);
         const url = path + (path.includes('?') ? '&' : '?') + 'dl=' + encodeURIComponent(t.token);
-        // Open in a NEW TOP-LEVEL window, never in the admin iframe. Safari
-        // refuses/navigates downloads inside cross-origin iframes (showing
-        // the file as raw text and freezing the app); a top-level window
-        // gets a clean Content-Disposition download in every browser.
-        const win = window.open(url, '_blank', 'noopener');
-        if (!win) {
-          // Popup blocked (rare in the admin embed) — fall back to a plain
-          // same-window anchor; same-origin URL + download attribute.
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = filename;
-          a.rel = 'noopener';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        }
+        iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.src = url;
+        document.body.appendChild(iframe);
         showToast('Export started — check your downloads', 'success');
+        setTimeout(() => { if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe); }, 8000);
       } catch (e) {
         showToast('Export failed: ' + e.message, 'error');
+        if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
       } finally {
         if (exportBtn) { exportBtn.disabled = false; if (originalLabel) exportBtn.textContent = originalLabel; }
       }
