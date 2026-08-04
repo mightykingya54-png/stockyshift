@@ -123,6 +123,50 @@ app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
 });
+
+// ─── TEMPORARY DEBUG: request log + client trace capture (REMOVE BEFORE LAUNCH)
+// Proves what Safari requests after Export CSV without Web Inspector access:
+// every /api request (URL, status, content-type, Referer, sec-fetch-dest) is
+// recorded; the client tracer uploads its navigation ring to /api/debug/trace.
+// If Safari navigates to /dashboard.html or /api/... the server SEES it here.
+// If the visible document is a blob, no second request appears — conclusive.
+const __reqLog = [];
+const __clientTrace = [];
+const __reqLogMax = 2000;
+app.use('/api', (req, res, next) => {
+  res.on('finish', () => {
+    const entry = {
+      t: new Date().toISOString().slice(11, 23),
+      m: req.method,
+      url: String(req.originalUrl || '').slice(0, 300),
+      status: res.statusCode,
+      ct: String(res.getHeader('content-type') || '').slice(0, 80) || null,
+      ref: String(req.headers.referer || '').slice(0, 200) || null,
+      dest: String(req.headers['sec-fetch-dest'] || ''),
+    };
+    __reqLog.push(entry);
+    if (__reqLog.length > __reqLogMax) __reqLog.shift();
+  });
+  next();
+});
+
+// Client trace upload — session-authed (the app iframe carries the cookie).
+app.post('/api/debug/trace', async (req, res) => {
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
+  __clientTrace.push({ t: new Date().toISOString().slice(11, 23), shop, n: lines.length, lines: lines.slice(-500) });
+  if (__clientTrace.length > 50) __clientTrace.shift();
+  res.json({ ok: true });
+});
+
+// Readback — key-gated (curl from terminal).
+app.get('/api/debug/trace', (req, res) => {
+  if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  res.json({ requests: __reqLog.slice(-500), clientTrace: __clientTrace.slice(-10) });
+});
 app.use(session({
   store: SessionStore,
   secret: process.env.SESSION_SECRET || (() => {
@@ -667,7 +711,11 @@ app.get('/', async (req, res, next) => {
       await db.run(`UPDATE merchants SET billing_status = 'active' WHERE shop = $1`, [shop]);
     }
 
-    // Send the dashboard HTML directly (NOT a redirect) so Shopify can't intercept
+    // Send the dashboard HTML directly (NOT a redirect) so Shopify can't intercept.
+    // must-revalidate: the dashboard is a live app — always serve the current
+    // version (bug fixes land constantly), never a stale cached copy. Safari's
+    // back/forward and iframe caches will otherwise serve an old JS bundle.
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
   } catch (e) {
     next(e);
@@ -723,7 +771,9 @@ app.get('/apps/stockyshift', async (req, res, next) => {
     // Refresh session shop so API calls (via getShop()) work even if session was stale
     req.session.shop = shop;
 
-    // Authenticated — serve the dashboard directly through the iframe
+    // Authenticated — serve the dashboard directly through the iframe.
+    // Same no-cache as the root route: never serve a stale JS bundle.
+    res.setHeader('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
   } catch (e) {
     next(e);

@@ -398,6 +398,169 @@
       } catch (_) { /* toast may not exist yet */ }
     });
 
+    // ══════════════════════════════════════════════════════════════════════
+    // TEMPORARY NAVIGATION TRACING — diagnose "app shows JS/text after Export"
+    // Instruments every navigation vector + fetch + lifecycle event, logs to
+    // console AND a persistent ring buffer (localStorage) so the trace survives
+    // even if this very document gets navigated away.
+    // REMOVE THIS BLOCK BEFORE LAUNCH.
+    // ══════════════════════════════════════════════════════════════════════
+    (function installNavTracing() {
+      const KEY = 'ss_navtrace';
+      let ring = [];
+      try { ring = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (_) { ring = []; }
+      const MAX = 800;
+      const now = () => new Date().toISOString().slice(11, 23) + '.' + String(Date.now() % 1000).padStart(3, '0');
+      function trace(msg, extra) {
+        const line = (typeof extra === 'undefined')
+          ? '[' + now() + '] ' + msg
+          : '[' + now() + '] ' + msg + ' :: ' + JSON.stringify(extra);
+        ring.push(line);
+        if (ring.length > MAX) ring.shift();
+        try { localStorage.setItem(KEY, JSON.stringify(ring)); } catch (_) {}
+        try { console.log('%cTRACE ' + line, 'color:#b36b00;font-weight:bold'); } catch (_) {}
+      }
+      window.__trace = trace;
+      window.__traceDump = () => ring.slice();
+
+      trace('APP SCRIPT START', { href: location.href, ua: navigator.userAgent, embedded: window.top !== window.self });
+
+      // ── 1. window.open — log every call + whether a window was actually returned
+      const _origOpen = window.open;
+      window.open = function (url, name, features) {
+        trace('window.open CALLED', { url: String(url), name, features, from: (new Error().stack || '').split('\n')[2] || '?' });
+        let ret = null;
+        try { ret = _origOpen.call(this, url, name, features); }
+        catch (e) { trace('window.open THREW', { err: String(e) }); throw e; }
+        trace('window.open RETURNED', { nonNull: !!ret, url: String(url) });
+        return ret;
+      };
+
+      // ── 2. fetch — log every request (status + content-type reveals the CSV vs HTML/JS)
+      const _origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+        const method = ((init && init.method) || 'GET');
+        const t0 = Date.now();
+        trace('fetch START', { url, method });
+        return _origFetch.apply(this, arguments).then((resp) => {
+          trace('fetch DONE', { url, status: resp.status, ct: resp.headers.get('content-type'), ms: Date.now() - t0 });
+          return resp;
+        }, (err) => {
+          trace('fetch ERROR', { url, err: String(err) });
+          throw err;
+        });
+      };
+
+      // ── 3. location.href / window.location / window.top.location assignments
+      // Can't intercept the property setter directly, so snapshot location.href
+      // every 250ms and log when it changes (this catches ANY assignment from
+      // any code, including our own).
+      let lastHref = location.href;
+      setInterval(() => {
+        if (location.href !== lastHref) {
+          trace('location.href CHANGED', { from: lastHref, to: location.href });
+          lastHref = location.href;
+        }
+      }, 250);
+      // Also poll window.top.location.href (only reachable when same-origin; in
+      // the Shopify embed it will throw/deny — that's also informative).
+      let lastTopHref = null;
+      setInterval(() => {
+        let topHref = null;
+        try { topHref = window.top.location.href; } catch (_) { topHref = '<cross-origin-unreadable>'; }
+        if (topHref !== lastTopHref) {
+          trace('window.top.location CHANGED', { from: lastTopHref, to: topHref });
+          lastTopHref = topHref;
+        }
+      }, 500);
+
+      // ── 4. history.pushState / replaceState (soft navigations)
+      try {
+        const _push = history.pushState;
+        history.pushState = function (s, t, u) { trace('history.pushState', { url: u }); return _push.apply(this, arguments); };
+        const _rep = history.replaceState;
+        history.replaceState = function (s, t, u) { trace('history.replaceState', { url: u }); return _rep.apply(this, arguments); };
+      } catch (_) {}
+
+      // ── 5. lifecycle / navigation events
+      ['pagehide', 'beforeunload', 'pageshow', 'visibilitychange'].forEach((ev) => {
+        window.addEventListener(ev, (e) => {
+          trace('EVENT ' + ev, {
+            persisted: e.persisted,
+            vis: document.visibilityState,
+            href: location.href,
+            from: (new Error().stack || '').split('\n')[2] || '?',
+          });
+        });
+      });
+
+      // ── 6. export-pipeline markers (must fire in order on Export click)
+      window.__traceExport = {
+        begin(path) { trace('EXPORT begin', { path }); },
+        tokenOk(token) { trace('EXPORT token ready', { len: token ? token.length : 0 }); },
+        trigger(path, token) { trace('EXPORT trigger', { path }); },
+        iframeCreated() { trace('EXPORT iframe created'); },
+        iframeRemoved() { trace('EXPORT iframe removed'); },
+      };
+
+      // ── 7. Blob URL creation — the KEY fact: what bytes go into the blob
+      // Safari renders when it navigates to a blob: document. Logs the URL,
+      // the blob's MIME type, and the first 200 bytes of its content.
+      const _origCreateObjectURL = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = function (blob) {
+        const url = _origCreateObjectURL(blob);
+        try {
+          const type = (blob && blob.type) || '?';
+          const size = (blob && blob.size !== undefined) ? blob.size : '?';
+          trace('createObjectURL', { url, type, size, stack: (new Error().stack || '').split('\n')[2] || '?' });
+          if (blob && typeof blob.slice === 'function') {
+            blob.slice(0, 200).text().then(t => {
+              trace('blob first200', { url, head: JSON.stringify(String(t).slice(0, 200)) });
+            }).catch(e => trace('blob read err', { url, err: String(e) }));
+          }
+        } catch (e) { trace('createObjectURL err', { url, err: String(e) }); }
+        return url;
+      };
+
+      // ── 8. Anchor clicks — the download anchor's default action is the
+      // suspected navigation vector. Capture ANY anchor click with its href.
+      document.addEventListener('click', (e) => {
+        const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+        if (a) {
+          trace('anchor click', {
+            href: String(a.href || '').slice(0, 200),
+            download: a.getAttribute('download') || null,
+            target: a.target || null,
+            defaultPrevented: e.defaultPrevented,
+          });
+        }
+      }, true);
+
+      // ── 9. Upload the trace ring to the server — survives the navigation
+      // even when THIS document is replaced by the blob. Keepalive fetch on
+      // pagehide + a 2s heartbeat so the evidence reaches /api/debug/trace.
+      function uploadTrace() {
+        try {
+          const qShop = new URLSearchParams(location.search).get('shop') || '';
+          fetch('/api/debug/trace?shop=' + encodeURIComponent(qShop), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lines: ring.slice() }),
+            keepalive: true,
+          }).catch(() => {});
+        } catch (_) {}
+      }
+      setInterval(uploadTrace, 2000);
+      window.addEventListener('pagehide', () => {
+        trace('PAGEHIDE upload', { href: location.href });
+        uploadTrace();
+      });
+
+      trace('NAV TRACING INSTALLED');
+    })();
+    // ═══════════════════════════ END NAV TRACING ═══════════════════════════
+
     // Small debounce helper — used by the multi-PO search so we don't refilter
     // 4K+ rows on every keystroke.
     function debounce(fn, wait = 150) {
