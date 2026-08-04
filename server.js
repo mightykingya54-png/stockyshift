@@ -242,6 +242,17 @@ app.get('/terms.html', (_req, res) => res.redirect(301, '/terms'));
 // privacy.html and terms.html are above this middleware, so the redirect fires first.
 app.use(express.static('views'));
 
+// HTML pages must never be cached either. Safari heuristically caches pages
+// served without explicit headers — a cached dashboard shell can run stale
+// JS (e.g. an old billing check) for days even after the server is fixed.
+// Pages are tiny; freshness always wins.
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path.endsWith('.html') || req.path === '/privacy' || req.path === '/terms' || req.path === '/apps/stockyshift') {
+    res.set('Cache-Control', 'no-store');
+  }
+  next();
+});
+
 // ─── Billing enforcement middleware ───────────────────────────────────────
 // Enforces paywall server-side — an expired/cancelled merchant cannot use
 // the API even if they bypass the client-side billing overlay.
