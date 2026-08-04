@@ -634,6 +634,85 @@
         };
       } catch (_) {}
 
+      // ── 9b. Every OTHER DOM-insertion path the overlay could use (since the
+      // text node did NOT go through appendChild — stack was empty). Each is
+      // gated to log only insertions whose payload exceeds 1000 chars, so the
+      // app's routine renders don't drown the ring. We capture the caller
+      // stack so the next run names the EXACT API + creator.
+      function __stack6() { return (new Error().stack || '').split('\n').slice(1, 7).join(' | '); }
+      function __logStr(label, s) {
+        if (typeof s === 'string' && s.length > 1000) trace('DOM hook ' + label, { len: s.length, head: s.slice(0, 100), stack: __stack6() });
+      }
+      function __logNode(label, c) {
+        if (c && c.nodeType === 3 && (c.textContent || '').length > 1000) trace('DOM hook ' + label, { len: c.textContent.length, head: c.textContent.slice(0, 100), stack: __stack6() });
+      }
+      // ...args variants (string or Node mix) — append / prepend / replaceChildren
+      function __hookVA(name, obj, fn) {
+        try {
+          const orig = obj[fn];
+          obj[fn] = function (...args) {
+            try { args.forEach(a => { if (typeof a === 'string') __logStr(name + '()', a); else __logNode(name + '()', a); }); } catch (_) {}
+            return orig.apply(this, arguments);
+          };
+        } catch (_) {}
+      }
+      __hookVA('ParentNode.append', Element.prototype, 'append');
+      __hookVA('ParentNode.prepend', Element.prototype, 'prepend');
+      __hookVA('ParentNode.replaceChildren', Element.prototype, 'replaceChildren');
+      __hookVA('Document.write', Document.prototype, 'write');
+      __hookVA('Document.writeln', Document.prototype, 'writeln');
+      try {
+        // insertAdjacentText(position, text)
+        const _iat = Element.prototype.insertAdjacentText;
+        Element.prototype.insertAdjacentText = function (pos, text) {
+          __logStr('insertAdjacentText(' + pos + ')', text);
+          return _iat.call(this, pos, text);
+        };
+      } catch (_) {}
+      try {
+        const _rin = Range.prototype.insertNode;
+        Range.prototype.insertNode = function (node) {
+          __logNode('Range.insertNode', node);
+          return _rin.call(this, node);
+        };
+      } catch (_) {}
+      // textContent + innerHTML setters — define on Element.prototype. gated
+      // to BODY/HTML only via "this === document.body" so normal renders stay silent.
+      try {
+        const tc = Object.getOwnPropertyDescriptor(Element.prototype, 'textContent');
+        if (tc && tc.set) {
+          Object.defineProperty(Element.prototype, 'textContent', {
+            get() { return tc.get.call(this); },
+            set(v) {
+              if (this === document.body && typeof v === 'string' && v.length > 100) {
+                trace('DOM hook textContent= on BODY', { len: v.length, head: v.slice(0, 100), stack: __stack6() });
+              }
+              return tc.set.call(this, v);
+            },
+            configurable: true,
+          });
+        }
+      } catch (_) {}
+      try {
+        const ih = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+        if (ih && ih.set) {
+          Object.defineProperty(Element.prototype, 'innerHTML', {
+            get() { return ih.get.call(this); },
+            set(v) {
+              if (this === document.body && typeof v === 'string' && v.length > 1000) {
+                trace('DOM hook innerHTML= on BODY', { len: v.length, head: v.slice(0, 100), stack: __stack6() });
+              }
+              return ih.set.call(this, v);
+            },
+            configurable: true,
+          });
+        }
+      } catch (_) {}
+      // Errors during the click window — a thrown error from the anchor
+      // default action could be the source of the overlay text.
+      window.addEventListener('error', (e) => trace('ERROR', { msg: String(e.message || '').slice(0, 150), src: String(e.filename || '').slice(0, 80), line: e.lineno, col: e.colno, stack: __stack6() }));
+      window.addEventListener('unhandledrejection', (e) => trace('UNHANDLED REJECTION', { reason: String(e.reason || '').slice(0, 200), stack: __stack6() }));
+
       // ── 10. Upload the trace ring to the server — survives the navigation
       // even when THIS document is replaced by the blob. Keepalive fetch on
       // pagehide + a 2s heartbeat so the evidence reaches /api/debug/trace.
