@@ -398,367 +398,6 @@
       } catch (_) { /* toast may not exist yet */ }
     });
 
-    // ══════════════════════════════════════════════════════════════════════
-    // TEMPORARY NAVIGATION + DOM TRACING — diagnose "app shows JS/text after Export"
-    // Part A (nav/fetch): proves whether a navigation happened (it did NOT —
-    // heartbeats survive the click, so the text overlay is NOT a navigation).
-    // Part B (DOM): finds WHICH DOM node renders the text — MutationObserver,
-    // huge text nodes, suspect elements, appendChild/insertBefore stacks,
-    // whole-body length swap detection.
-    // REMOVE THIS BLOCK BEFORE LAUNCH.
-    // ══════════════════════════════════════════════════════════════════════
-    (function installNavTracing() {
-      const KEY = 'ss_navtrace';
-      let ring = [];
-      try { ring = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (_) { ring = []; }
-      const MAX = 800;
-      const now = () => new Date().toISOString().slice(11, 23) + '.' + String(Date.now() % 1000).padStart(3, '0');
-      function trace(msg, extra) {
-        const line = (typeof extra === 'undefined')
-          ? '[' + now() + '] ' + msg
-          : '[' + now() + '] ' + msg + ' :: ' + JSON.stringify(extra);
-        ring.push(line);
-        if (ring.length > MAX) ring.shift();
-        try { localStorage.setItem(KEY, JSON.stringify(ring)); } catch (_) {}
-        try { console.log('%cTRACE ' + line, 'color:#b36b00;font-weight:bold'); } catch (_) {}
-      }
-      window.__trace = trace;
-      window.__traceDump = () => ring.slice();
-
-      trace('APP SCRIPT START', { href: location.href, ua: navigator.userAgent, embedded: window.top !== window.self });
-
-      // ── 1. window.open — log every call + whether a window was actually returned
-      const _origOpen = window.open;
-      window.open = function (url, name, features) {
-        trace('window.open CALLED', { url: String(url), name, features, from: (new Error().stack || '').split('\n')[2] || '?' });
-        let ret = null;
-        try { ret = _origOpen.call(this, url, name, features); }
-        catch (e) { trace('window.open THREW', { err: String(e) }); throw e; }
-        trace('window.open RETURNED', { nonNull: !!ret, url: String(url) });
-        return ret;
-      };
-
-      // ── 2. fetch — log every request (status + content-type reveals the CSV vs HTML/JS)
-      const _origFetch = window.fetch;
-      window.fetch = function (input, init) {
-        const url = typeof input === 'string' ? input : (input && input.url) || String(input);
-        const method = ((init && init.method) || 'GET');
-        const t0 = Date.now();
-        trace('fetch START', { url, method });
-        return _origFetch.apply(this, arguments).then((resp) => {
-          trace('fetch DONE', { url, status: resp.status, ct: resp.headers.get('content-type'), ms: Date.now() - t0 });
-          return resp;
-        }, (err) => {
-          trace('fetch ERROR', { url, err: String(err) });
-          throw err;
-        });
-      };
-
-      // ── 3. location.href / window.location / window.top.location assignments
-      // Can't intercept the property setter directly, so snapshot location.href
-      // every 250ms and log when it changes (this catches ANY assignment from
-      // any code, including our own).
-      let lastHref = location.href;
-      setInterval(() => {
-        if (location.href !== lastHref) {
-          trace('location.href CHANGED', { from: lastHref, to: location.href });
-          lastHref = location.href;
-        }
-      }, 250);
-      // Also poll window.top.location.href (only reachable when same-origin; in
-      // the Shopify embed it will throw/deny — that's also informative).
-      let lastTopHref = null;
-      setInterval(() => {
-        let topHref = null;
-        try { topHref = window.top.location.href; } catch (_) { topHref = '<cross-origin-unreadable>'; }
-        if (topHref !== lastTopHref) {
-          trace('window.top.location CHANGED', { from: lastTopHref, to: topHref });
-          lastTopHref = topHref;
-        }
-      }, 500);
-
-      // ── 4. history.pushState / replaceState (soft navigations)
-      try {
-        const _push = history.pushState;
-        history.pushState = function (s, t, u) { trace('history.pushState', { url: u }); return _push.apply(this, arguments); };
-        const _rep = history.replaceState;
-        history.replaceState = function (s, t, u) { trace('history.replaceState', { url: u }); return _rep.apply(this, arguments); };
-      } catch (_) {}
-
-      // ── 5. lifecycle / navigation events
-      ['pagehide', 'beforeunload', 'pageshow', 'visibilitychange'].forEach((ev) => {
-        window.addEventListener(ev, (e) => {
-          trace('EVENT ' + ev, {
-            persisted: e.persisted,
-            vis: document.visibilityState,
-            href: location.href,
-            from: (new Error().stack || '').split('\n')[2] || '?',
-          });
-        });
-      });
-
-      // ── 6. export-pipeline markers (must fire in order on Export click)
-      window.__traceExport = {
-        begin(path) { trace('EXPORT begin', { path }); },
-        tokenOk(token) { trace('EXPORT token ready', { len: token ? token.length : 0 }); },
-        trigger(path, token) { trace('EXPORT trigger', { path }); },
-        iframeCreated() { trace('EXPORT iframe created'); },
-        iframeRemoved() { trace('EXPORT iframe removed'); },
-      };
-
-      // ── 7. Blob URL creation — the KEY fact: what bytes go into the blob
-      // Safari renders when it navigates to a blob: document. Logs the URL,
-      // the blob's MIME type, and the first 200 bytes of its content.
-      const _origCreateObjectURL = URL.createObjectURL.bind(URL);
-      URL.createObjectURL = function (blob) {
-        const url = _origCreateObjectURL(blob);
-        try {
-          const type = (blob && blob.type) || '?';
-          const size = (blob && blob.size !== undefined) ? blob.size : '?';
-          trace('createObjectURL', { url, type, size, stack: (new Error().stack || '').split('\n')[2] || '?' });
-          if (blob && typeof blob.slice === 'function') {
-            blob.slice(0, 200).text().then(t => {
-              trace('blob first200', { url, head: JSON.stringify(String(t).slice(0, 200)) });
-            }).catch(e => trace('blob read err', { url, err: String(e) }));
-          }
-        } catch (e) { trace('createObjectURL err', { url, err: String(e) }); }
-        return url;
-      };
-
-      // ── 8. Anchor clicks — the download anchor's default action is the
-      // suspected navigation vector. Capture ANY anchor click with its href.
-      document.addEventListener('click', (e) => {
-        const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-        if (a) {
-          trace('anchor click', {
-            href: String(a.href || '').slice(0, 200),
-            download: a.getAttribute('download') || null,
-            target: a.target || null,
-            defaultPrevented: e.defaultPrevented,
-          });
-        }
-      }, true);
-
-      // ── 9. DOM instrumentation — find WHAT renders the text overlay.
-      // Navigation was disproven (heartbeats survived the click), so the
-      // visible text must be a DOM node (or a whole body swap) inside THIS
-      // document. Observe everything; flag big text + suspicious elements.
-      const __SUSPECT_TAGS = new Set(['PRE', 'IFRAME', 'OBJECT', 'EMBED', 'TEXTAREA', 'SCRIPT', 'STYLE', 'XMP', 'PLAINTEXT', 'SVG', 'CANVAS', 'VIDEO', 'AUDIO']);
-      function __desc(n) {
-        try {
-          if (!n || n.nodeType !== 1) return null;
-          return { tag: n.tagName || '?', id: String(n.id || '').slice(0, 40), cls: String(n.className || '').slice(0, 40), connected: !!n.isConnected };
-        } catch (_) { return null; }
-      }
-      function __directTextLen(el) {
-        let len = 0;
-        try { for (const c of el.childNodes || []) if (c.nodeType === 3) len += (c.textContent || '').length; } catch (_) {}
-        return len;
-      }
-      let __lastBodyLen = -1;
-      try { __lastBodyLen = document.body ? document.body.textContent.length : -1; } catch (_) {}
-      const __mo = new MutationObserver((muts) => {
-        for (const m of muts) {
-          for (const node of m.addedNodes) {
-            if (node.nodeType === 3) {
-              const len = (node.textContent || '').length;
-              if (len > 1000) {
-                trace('DOM: HUGE TEXT NODE added', {
-                  len,
-                  head: String(node.textContent).slice(0, 120),
-                  parent: __desc(node.parentElement),
-                  stack: (new Error().stack || '').split('\n').slice(1, 5).join(' | '),
-                });
-              }
-              continue;
-            }
-            if (node.nodeType !== 1) continue;
-            const d = __desc(node);
-            if (!d) continue;
-            if (__SUSPECT_TAGS.has(d.tag)) {
-              const dt = __directTextLen(node);
-              trace('DOM: ' + d.tag + ' element added', { ...d, directTextLen: dt, head: (node.textContent || '').slice(0, 80) });
-            }
-            const dt = __directTextLen(node);
-            if (dt > 1000) {
-              trace('DOM: large text container added', { ...d, directTextLen: dt, head: (node.textContent || '').slice(0, 100) });
-            }
-          }
-        }
-      });
-      try {
-        __mo.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
-        trace('DOM observer active');
-      } catch (e) { trace('DOM observer FAILED', { err: String(e) }); }
-
-      // Whole-document swap detection: body textContent length jumping by
-      // thousands in one poll = the document was replaced from within.
-      setInterval(() => {
-        try {
-          if (!document.body) return;
-          const len = document.body.textContent.length;
-          if (len !== __lastBodyLen) {
-            trace('DOM: body textContent length changed', {
-              from: __lastBodyLen, to: len, diff: len - __lastBodyLen,
-              head: document.body.textContent.slice(0, 100),
-              stack: (new Error().stack || '').split('\n').slice(1, 5).join(' | '),
-            });
-            __lastBodyLen = len;
-          }
-        } catch (_) {}
-      }, 1000);
-
-      // Creator stack for ANY huge text node / suspect element inserted via
-      // the DOM API (catches code paths that build the overlay programmatically).
-      try {
-        const __origAppendChild = Node.prototype.appendChild;
-        Node.prototype.appendChild = function (child) {
-          try {
-            if (child && child.nodeType === 3 && (child.textContent || '').length > 1000) {
-              trace('DOM: HUGE appendChild stack', { len: child.textContent.length, stack: (new Error().stack || '').split('\n').slice(1, 6).join(' | ') });
-            }
-            if (child && child.nodeType === 1 && __SUSPECT_TAGS.has(child.tagName) && child.isConnected) {
-              trace('DOM: ' + child.tagName + ' appendChild stack', { stack: (new Error().stack || '').split('\n').slice(1, 6).join(' | ') });
-            }
-          } catch (_) {}
-          return __origAppendChild.call(this, child);
-        };
-        const __origInsertBefore = Node.prototype.insertBefore;
-        Node.prototype.insertBefore = function (child, ref) {
-          try {
-            if (child && child.nodeType === 3 && (child.textContent || '').length > 1000) {
-              trace('DOM: HUGE insertBefore stack', { len: child.textContent.length, stack: (new Error().stack || '').split('\n').slice(1, 6).join(' | ') });
-            }
-          } catch (_) {}
-          return __origInsertBefore.call(this, child, ref);
-        };
-      } catch (_) {}
-
-      // ── 9b. Every OTHER DOM-insertion path the overlay could use (since the
-      // text node did NOT go through appendChild — stack was empty). Each is
-      // gated to log only insertions whose payload exceeds 1000 chars, so the
-      // app's routine renders don't drown the ring. We capture the caller
-      // stack so the next run names the EXACT API + creator.
-      function __stack6() { return (new Error().stack || '').split('\n').slice(1, 7).join(' | '); }
-      function __logStr(label, s) {
-        if (typeof s === 'string' && s.length > 1000) trace('DOM hook ' + label, { len: s.length, head: s.slice(0, 100), stack: __stack6() });
-      }
-      function __logNode(label, c) {
-        if (c && c.nodeType === 3 && (c.textContent || '').length > 1000) trace('DOM hook ' + label, { len: c.textContent.length, head: c.textContent.slice(0, 100), stack: __stack6() });
-      }
-      // ...args variants (string or Node mix) — append / prepend / replaceChildren
-      function __hookVA(name, obj, fn) {
-        try {
-          const orig = obj[fn];
-          obj[fn] = function (...args) {
-            try { args.forEach(a => { if (typeof a === 'string') __logStr(name + '()', a); else __logNode(name + '()', a); }); } catch (_) {}
-            return orig.apply(this, arguments);
-          };
-        } catch (_) {}
-      }
-      __hookVA('ParentNode.append', Element.prototype, 'append');
-      __hookVA('ParentNode.prepend', Element.prototype, 'prepend');
-      __hookVA('ParentNode.replaceChildren', Element.prototype, 'replaceChildren');
-      __hookVA('Document.write', Document.prototype, 'write');
-      __hookVA('Document.writeln', Document.prototype, 'writeln');
-      try {
-        // insertAdjacentText(position, text)
-        const _iat = Element.prototype.insertAdjacentText;
-        Element.prototype.insertAdjacentText = function (pos, text) {
-          __logStr('insertAdjacentText(' + pos + ')', text);
-          return _iat.call(this, pos, text);
-        };
-      } catch (_) {}
-      try {
-        const _rin = Range.prototype.insertNode;
-        Range.prototype.insertNode = function (node) {
-          __logNode('Range.insertNode', node);
-          return _rin.call(this, node);
-        };
-      } catch (_) {}
-      // textContent + innerHTML setters — define on Element.prototype. gated
-      // to BODY/HTML only via "this === document.body" so normal renders stay silent.
-      try {
-        const tc = Object.getOwnPropertyDescriptor(Element.prototype, 'textContent');
-        if (tc && tc.set) {
-          Object.defineProperty(Element.prototype, 'textContent', {
-            get() { return tc.get.call(this); },
-            set(v) {
-              if (this === document.body && typeof v === 'string' && v.length > 100) {
-                trace('DOM hook textContent= on BODY', { len: v.length, head: v.slice(0, 100), stack: __stack6() });
-              }
-              return tc.set.call(this, v);
-            },
-            configurable: true,
-          });
-        }
-      } catch (_) {}
-      try {
-        const ih = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
-        if (ih && ih.set) {
-          Object.defineProperty(Element.prototype, 'innerHTML', {
-            get() { return ih.get.call(this); },
-            set(v) {
-              if (this === document.body && typeof v === 'string' && v.length > 1000) {
-                trace('DOM hook innerHTML= on BODY', { len: v.length, head: v.slice(0, 100), stack: __stack6() });
-              }
-              return ih.set.call(this, v);
-            },
-            configurable: true,
-          });
-        }
-      } catch (_) {}
-      // Errors during the click window — a thrown error from the anchor
-      // default action could be the source of the overlay text.
-      window.addEventListener('error', (e) => trace('ERROR', { msg: String(e.message || '').slice(0, 150), src: String(e.filename || '').slice(0, 80), line: e.lineno, col: e.colno, stack: __stack6() }));
-      window.addEventListener('unhandledrejection', (e) => trace('UNHANDLED REJECTION', { reason: String(e.reason || '').slice(0, 200), stack: __stack6() }));
-
-      // ── 10. Upload the trace ring to the server — survives the navigation
-      // even when THIS document is replaced by the blob. Keepalive fetch on
-      // pagehide + a 2s heartbeat so the evidence reaches /api/debug/trace.
-      // Each upload carries the page's BUILD stamp AND the instance ID the
-      // page fetched from /api/debug/instance — the server compares these to
-      // prove browser and log-reader are on the SAME deployment instance.
-      let __traceServerInstance = null;
-      try {
-        fetch('/api/debug/instance', { cache: 'no-store' })
-          .then(r => r.json())
-          .then(d => {
-            __traceServerInstance = d.instance;
-            trace('instance probe', {
-              instance: d.instance,
-              build: d.build,
-              boot: d.boot,
-              myBuild: __BUILD,
-            });
-          })
-          .catch(e => trace('instance probe err', { err: String(e) }));
-      } catch (_) {}
-      function uploadTrace() {
-        try {
-          const qShop = new URLSearchParams(location.search).get('shop') || '';
-          fetch('/api/debug/trace?shop=' + encodeURIComponent(qShop), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              lines: ring.slice(),
-              build: __BUILD,
-              instance: __traceServerInstance,
-            }),
-            keepalive: true,
-          }).catch(() => {});
-        } catch (_) {}
-      }
-      setInterval(uploadTrace, 2000);
-      window.addEventListener('pagehide', () => {
-        trace('PAGEHIDE upload', { href: location.href });
-        uploadTrace();
-      });
-
-      trace('NAV TRACING INSTALLED');
-    })();
-    // ═══════════════════════════ END NAV TRACING ═══════════════════════════
-
     // Small debounce helper — used by the multi-PO search so we don't refilter
     // 4K+ rows on every keystroke.
     function debounce(fn, wait = 150) {
@@ -776,6 +415,7 @@
     // ─── Shopify App Bridge (embedded mode) ────────────────────────
     const isEmbedded = window.top !== window.self;
     let __appBridgeApp = null;
+    let __appBridgeRedirect = null;
     let __getSessionToken = null;
     let __appBridgeReady = null;
     let __tokenCache = { token: null, exp: 0 };
@@ -791,9 +431,13 @@
           // unpkg is the UMD build (no ESM exports -> createApp undefined), and
           // v3.7.11 has NO app.idToken() — that API came in v4. The v3 way is
           // getSessionToken(app) from the utilities deep import.
-          const { createApp } = await import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/+esm');
-          const { getSessionToken } = await import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/utilities/session-token/+esm');
+          const [{ createApp }, { getSessionToken }, { Redirect }] = await Promise.all([
+            import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/+esm'),
+            import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/utilities/session-token/+esm'),
+            import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/actions/Navigation/Redirect/+esm'),
+          ]);
           __appBridgeApp = createApp({ apiKey: config.api_key, host });
+          __appBridgeRedirect = Redirect;
           __getSessionToken = getSessionToken;
           // Prime the token cache
           __tokenCache.token = await getSessionToken(__appBridgeApp);
@@ -1101,18 +745,21 @@
       return res.json();
     }
 
-    // ─── CSV export (warm signed token + hidden iframe attachment URL) ──
-    const __BUILD = '0ccbd88'; // shown in Settings; used to verify live build vs cached page
-    // Documented WebKit behavior (WebKit bug 190351, bug 216918): the
-    // blob+URL.createObjectURL+<a download>+click() path is BROKEN in Safari —
-    // WebKit "tries to load the blob instead of downloading it". That is what
-    // painted the app's own text over the UI (confirmed by DOM trace: an 83KB
-    // text node containing body.textContent appeared 3ms after the blob anchor
-    // click, created by no loaded script). The signal WebKit honors is the
-    // Content-Disposition: attachment header on a real HTTP response
-    // (Playwright webkit test 20089), triggered from an embedded app via a
-    // hidden iframe (Shopify dev forum, July 2026). The signed 60s token is
-    // kept WARM so the click handler never waits on the network.
+    // ─── CSV export (warm signed token + top-level download via App Bridge) ──
+    const __BUILD = '71b00b9'; // shown in Settings; used to verify live build vs cached page
+    // Delivery pattern (matches production Shopify apps, verified against
+    // shopify.dev App Bridge Redirect docs + app-bridge source):
+    //   EMBEDDED → Redirect.create(app).dispatch(Redirect.Action.REMOTE, url)
+    //   The Redirect action set "allows you to modify the top-level browser
+    //   URL". The top-level window (Shopify admin) navigates to the signed
+    //   attachment URL; the browser honors Content-Disposition: attachment and
+    //   DOWNLOADS without painting anything. No hidden iframe, no blob, no
+    //   anchor click — the embedded app iframe never moves, so WebKit never
+    //   gets a document load to misrender.
+    //   STANDALONE → window.open(url, '_blank') — same attachment response,
+    //   download starts in the new tab.
+    // The signed 60s token is kept WARM so the click handler never waits on
+    // the network.
     let __dlToken = null;
     let __dlTokenExp = 0;
     async function ensureDownloadToken() {
@@ -1124,36 +771,30 @@
     }
     setInterval(() => { ensureDownloadToken().catch(() => {}); }, 30000);
 
-    // Download via hidden iframe → the server's attachment URL. The visible app
-    // iframe never navigates. WebKit sees Content-Disposition: attachment and
-    // downloads (Playwright 20089); even in the worst case of a browser that
-    // ignores the header, the response renders inside a display:none iframe —
-    // it cannot paint over the app. No blob, no createObjectURL, no anchor
-    // click: the exact WebKit-broken path is never used.
     async function downloadCsv(path, filename) {
       const exportBtn = document.activeElement;
       const originalLabel = exportBtn ? exportBtn.textContent : null;
       if (exportBtn) { exportBtn.disabled = true; exportBtn.textContent = 'Exporting...'; }
-      let iframe = null;
-      let removeTimer = null;
       try {
         const token = await ensureDownloadToken();
         const url = path + (path.includes('?') ? '&' : '?') + 'dl=' + encodeURIComponent(token);
-        iframe = document.createElement('iframe');
-        iframe.style.display = 'none';
-        iframe.setAttribute('aria-hidden', 'true');
-        iframe.addEventListener('load', () => {
-          if (iframe) { iframe.remove(); iframe = null; }
-          if (removeTimer) { clearTimeout(removeTimer); removeTimer = null; }
-        });
-        iframe.src = url;
-        document.body.appendChild(iframe);
-        // Safety net: drop the iframe after the token lifetime even if no load
-        // event fires (Safari attachment downloads may not fire load on the
-        // iframe at all).
-        removeTimer = setTimeout(() => {
-          if (iframe) { iframe.remove(); iframe = null; }
-        }, 15000);
+        if (isEmbedded && __appBridgeApp && __appBridgeRedirect) {
+          // Ensure App Bridge init finished (dynamic imports + token prime)
+          if (__appBridgeReady) {
+            await Promise.race([
+              __appBridgeReady,
+              new Promise((resolve) => setTimeout(resolve, 3000)),
+            ]);
+          }
+          // Top-level navigation to the signed attachment URL → browser
+          // downloads, admin stays put, app iframe untouched.
+          __appBridgeRedirect.create(__appBridgeApp).dispatch(__appBridgeRedirect.Action.REMOTE, url);
+        } else {
+          // Standalone (non-embedded) mode: open the attachment URL in a new
+          // tab. Content-Disposition: attachment makes it download, leaving
+          // the app tab untouched.
+          window.open(url, '_blank');
+        }
         showToast('Export started — check your downloads', 'success');
       } catch (e) {
         showToast('Export failed: ' + e.message, 'error');

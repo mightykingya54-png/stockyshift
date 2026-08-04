@@ -19,48 +19,6 @@ const SessionStore = new SqliteStore({
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── TEMPORARY DEBUG: catch-all request log (REMOVE BEFORE LAUNCH) ────────
-// Mounted as the VERY FIRST middleware — before security headers, body
-// parsing, sessions, auth, billing, and every route. Logs EVERY incoming
-// request on ANY path (/, /dashboard.html, /api/..., webhooks, static) with
-// the full URL, method, Host, Referer, User-Agent, sec-fetch-dest and the
-// response status. Purpose: prove, from the server side, whether the hidden
-// download iframe ever navigates to /api/.../export?dl=... (a real iframe
-// navigation carries sec-fetch-dest: iframe; a fetch carries sec-fetch-dest:
-// empty — the two are distinguishable in this log).
-const __reqLog = [];
-const __clientTrace = [];
-const __reqLogMax = 2000;
-// Unique per-process identity. The suffix is Date.now().toString(36) captured
-// at process start — it NEVER changes during the process lifetime, so the ID
-// proves browser and log-reader are on the SAME Render instance. (The "boot"
-// field in /api/debug/instance is NOT boot time — it is new Date() at request
-// time; do not use it to detect restarts.)
-const __INSTANCE = [
-  process.env.RENDER_INSTANCE_ID || require('os').hostname() || 'unknown',
-  Date.now().toString(36),
-].join('-');
-app.use((req, res, next) => {
-  res.on('finish', () => {
-    const entry = {
-      t: new Date().toISOString().slice(11, 23),
-      m: req.method,
-      url: String(req.originalUrl || req.url || '').slice(0, 300),
-      host: String(req.headers.host || '').slice(0, 80) || null,
-      ref: String(req.headers.referer || '').slice(0, 200) || null,
-      ua: String(req.headers['user-agent'] || '').slice(0, 120) || null,
-      dest: String(req.headers['sec-fetch-dest'] || ''),
-      site: String(req.headers['sec-fetch-site'] || ''),
-      status: res.statusCode,
-      ct: String(res.getHeader('content-type') || '').slice(0, 80) || null,
-      inst: __INSTANCE,
-    };
-    __reqLog.push(entry);
-    if (__reqLog.length > __reqLogMax) __reqLog.shift();
-  });
-  next();
-});
-
 // ─── Rate limiting (simple in-memory fixed-window) ────────────────────────
 // Protects /auth and /auth/callback from oauth_states table flooding (an
 // attacker hitting /auth?shop=x repeatedly grows the oauth_states table faster
@@ -165,21 +123,6 @@ app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
 });
-
-// Instance identity + build stamp, served with no-store so a CDN can never
-// answer it from cache. The tracer reads this on boot and reports it back.
-app.get('/api/debug/instance', (req, res) => {
-  res.set('Cache-Control', 'no-store, max-age=0');
-  res.set('Pragma', 'no-cache');
-  res.json({
-    instance: __INSTANCE,
-    build: '0ccbd88',
-    boot: new Date().toISOString(),
-  });
-});
-
-// Client trace upload + readback are defined BELOW, after the CSRF/billing
-// middleware (the /debug path is billing-exempt; readback is key-gated).
 
 app.use(session({
   store: SessionStore,
@@ -363,31 +306,6 @@ app.use('/api', async (req, res, next) => {
     console.error('[Billing] Enforcement check failed:', e.message);
     next(); // fail open on DB error, auth still applies
   }
-});
-
-// ─── TEMPORARY DEBUG: client trace upload + key-gated readback (REMOVE BEFORE LAUNCH)
-// Upload does NOT require session auth: the embedded iframe authenticates via
-// App Bridge Bearer tokens, and the session cookie is not guaranteed present
-// in that context (which caused 401s). The CSRF middleware above still
-// origin-checks this POST (stockyshift.com / admin.shopify.com only).
-// The readback is gated by DEBUG_KEY so the ring is never exposed publicly.
-app.post('/api/debug/trace', async (req, res) => {
-  const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
-  const shop = (req.query.shop || '').toString().slice(0, 100);
-  __clientTrace.push({ t: new Date().toISOString().slice(11, 23), shop, n: lines.length, inst: __INSTANCE, lines: lines.slice(-500) });
-  if (__clientTrace.length > 50) __clientTrace.shift();
-  res.json({ ok: true, instance: __INSTANCE });
-});
-
-app.get('/api/debug/trace', (req, res) => {
-  if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  res.json({
-    reader: { instance: __INSTANCE },
-    requests: __reqLog.slice(-500),
-    clientTrace: __clientTrace.slice(-10),
-  });
 });
 
 // ─── Static Pages ─────────────────────────────────────────────────────────
@@ -2073,56 +1991,6 @@ async function detectDevStore(shop, token) {
     return false;
   }
 }
-
-// TEMPORARY debug endpoint (REMOVE before launch): read-only merchant row
-// inspector + live Shopify probe. Only responds when DEBUG_KEY env matches.
-app.get('/api/debug/merchant', async (req, res) => {
-  if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  const shop = String(req.query.shop || '').toLowerCase();
-  if (!shop || !/^[a-z0-9-]+\.myshopify\.com$/.test(shop)) {
-    return res.status(400).json({ error: 'shop required' });
-  }
-  const m = await db.get(
-    'SELECT shop, billing_status, trial_used, is_active, uninstalled_at, trial_ends_at, shopify_charge_id, LENGTH(access_token) AS token_len, expires_at, installed_at FROM merchants WHERE shop = $1',
-    [shop]
-  );
-  if (!m) return res.json({ not_found: true });
-  let probe = null;
-  try {
-    const token = await getToken(shop);
-    if (!token) {
-      probe = { token: 'none' };
-    } else {
-      const r = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-        query: `{ shop { plan { partnerType } } currentAppInstallation { activeSubscriptions { id status } } }`,
-      }, {
-        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
-        timeout: 8000,
-      });
-      probe = {
-        token: 'ok',
-        partnerType: r.data?.data?.shop?.plan?.partnerType ?? null,
-        subs: (r.data?.data?.currentAppInstallation?.activeSubscriptions || []).map(s => ({ id: s.id, status: s.status })),
-        errors: r.data?.errors || null,
-      };
-      // REST fallback probe: what does plan_name report for this shop?
-      try {
-        const rest = await axios.get(`https://${shop}/admin/api/${API_VERSION}/shop.json`, {
-          headers: { 'X-Shopify-Access-Token': token },
-          timeout: 8000,
-        });
-        probe.rest_plan_name = rest.data?.shop?.plan_name ?? null;
-      } catch (restErr) {
-        probe.rest_error = restErr.message;
-      }
-    }
-  } catch (e) {
-    probe = { error: e.message };
-  }
-  return res.json({ merchant: m, probe });
-});
 
 app.get('/api/billing/status', async (req, res) => {
   const shop = requireShop(req, res);
