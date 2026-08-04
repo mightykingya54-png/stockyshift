@@ -480,7 +480,7 @@ app.get('/auth/callback', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (re
     // confirmation URL. Heal-skipping also protects against a stale test
     // subscription from an earlier test charge re-latching this store to
     // 'trial' without the user ever seeing the checkout.
-    if (!DEV_SHOW_BILLING && merchant && (merchant.billing_status === 'pending' || merchant.billing_status === 'trial')) {
+    if (!DEV_SHOW_BILLING && merchant && (merchant.billing_status === 'pending' || merchant.billing_status === 'trial' || merchant.billing_status === 'cancelled')) {
       // First: check shop plan type. Dev/affiliate/staff stores bypass billing
       // entirely — set them as 'trial' with no Shopify charge ID. Production
       // stores get the App Pricing subscription lookup below.
