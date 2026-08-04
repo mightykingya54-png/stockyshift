@@ -480,7 +480,7 @@ app.get('/auth/callback', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (re
     // confirmation URL. Heal-skipping also protects against a stale test
     // subscription from an earlier test charge re-latching this store to
     // 'trial' without the user ever seeing the checkout.
-    if (!DEV_SHOW_BILLING && merchant && (merchant.billing_status === 'pending' || merchant.billing_status === 'trial' || merchant.billing_status === 'cancelled')) {
+    if (!DEV_SHOW_BILLING && merchant && (merchant.billing_status === 'pending' || merchant.billing_status === 'trial' || ['cancelled', 'declined', 'expired', 'frozen'].includes(merchant.billing_status))) {
       // First: check shop plan type. Dev/affiliate/staff stores bypass billing
       // entirely — set them as 'trial' with no Shopify charge ID. Production
       // stores get the App Pricing subscription lookup below.
@@ -1903,6 +1903,9 @@ function isBillingActive(merchant) {
 // Shopify-hosted plan-selection page (see /api/billing/create).
 
 // Get billing status for the dashboard
+// Dev-store plan-type cache for the billing status self-heal (10 min TTL).
+const __devStoreCache = new Map(); // shop -> { isDev: bool, at: ms }
+
 app.get('/api/billing/status', async (req, res) => {
   const shop = requireShop(req, res);
   if (!shop) return;
@@ -1912,6 +1915,46 @@ app.get('/api/billing/status', async (req, res) => {
 
   if (process.env.NODE_ENV !== 'production' && process.env.SKIP_BILLING === 'true') {
     return res.json({ status: 'active', plan: BILLING_PLAN.name, skip_billing: true });
+  }
+
+  // Dev-store self-heal: with DEV_SHOW_BILLING off, dev stores must never
+  // see a paywall. A reinstall (or a declined plan page) can leave a stale
+  // non-active status (cancelled/declined/expired/frozen/pending) that the
+  // /auth heal never touched — heal it here on every status read so a stuck
+  // row can't block the dashboard. Production stores without an active
+  // subscription stay in their state (correct paywall behavior).
+  if (!DEV_SHOW_BILLING && merchant && ['pending', 'trial', 'cancelled', 'declined', 'expired', 'frozen'].includes(merchant.billing_status)) {
+    try {
+      const cached = __devStoreCache.get(shop);
+      let isDevStore = cached ? cached.isDev : null;
+      if (cached && Date.now() - cached.at > 10 * 60 * 1000) __devStoreCache.delete(shop);
+      if (isDevStore === null) {
+        const token = await getToken(shop);
+        if (token) {
+          const shopInfo = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+            query: `{ shop { plan { partnerType } } }`,
+          }, {
+            headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+            timeout: 8000,
+          });
+          isDevStore = ['affiliate', 'staff', 'shopify_plus_partner', 'partner_test'].includes(
+            shopInfo.data?.data?.shop?.plan?.partnerType
+          );
+          __devStoreCache.set(shop, { isDev: isDevStore, at: Date.now() });
+        }
+      }
+      if (isDevStore) {
+        const prev = merchant.billing_status;
+        const trialEnd = new Date();
+        trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
+        await db.run(`UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, trial_used = 1 WHERE shop = $2`, [trialEnd.toISOString(), shop]);
+        merchant.billing_status = 'trial';
+        merchant.trial_ends_at = trialEnd.toISOString();
+        console.log(`[Billing] ${shop} dev store healed to trial (was stuck at '${prev}')`);
+      }
+    } catch (err) {
+      console.warn(`[Billing] Dev-store heal check failed for ${shop}: ${err.message}`);
+    }
   }
 
   // Calculate trial days remaining
