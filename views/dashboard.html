@@ -733,6 +733,7 @@
     }
 
     // ─── CSV export (warm signed token; Safari window.open / others iframe) ──
+    const __BUILD = '2e4f3bc'; // shown in Settings; used to verify live build vs cached page
     // Pattern: (1) the signed token is kept WARM (prefetched on tab load +
     // refreshed every 30s) so the click handler triggers the download
     // SYNCHRONOUSLY — Safari drops downloads when an await sits between the
@@ -1243,7 +1244,7 @@
               <tr><td style="padding:8px 0;color:#666">Status</td><td><strong>${esc(statusLabel)}</strong></td></tr>
             </table>
             ${statusDetail}
-            <p style="color:#999;font-size:12px;margin-top:12px;font-family:monospace">DEV_SHOW_BILLING=${billing.dev_show_billing ? 'ON' : 'off'} · status=${esc(billing.status)} · trialDaysLeft=${billing.trial_days_left}</p>
+            <p style="color:#999;font-size:12px;margin-top:12px;font-family:monospace">DEV_SHOW_BILLING=${billing.dev_show_billing ? 'ON' : 'off'} · status=${esc(billing.status)} · trialDaysLeft=${billing.trial_days_left} · build:${__BUILD}</p>
             <div class="btn-row" style="margin-top:16px">
               ${manageBtn}
             </div>
