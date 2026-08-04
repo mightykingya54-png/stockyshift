@@ -746,13 +746,22 @@
       try {
         const t = await api(`/api/export/token?shop=${encodeURIComponent(shop)}`);
         const url = path + (path.includes('?') ? '&' : '?') + 'dl=' + encodeURIComponent(t.token);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.rel = 'noopener';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        // Open in a NEW TOP-LEVEL window, never in the admin iframe. Safari
+        // refuses/navigates downloads inside cross-origin iframes (showing
+        // the file as raw text and freezing the app); a top-level window
+        // gets a clean Content-Disposition download in every browser.
+        const win = window.open(url, '_blank', 'noopener');
+        if (!win) {
+          // Popup blocked (rare in the admin embed) — fall back to a plain
+          // same-window anchor; same-origin URL + download attribute.
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          a.rel = 'noopener';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
         showToast('Export started — check your downloads', 'success');
       } catch (e) {
         showToast('Export failed: ' + e.message, 'error');
