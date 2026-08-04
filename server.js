@@ -133,6 +133,15 @@ app.use('/api', (req, res, next) => {
 const __reqLog = [];
 const __clientTrace = [];
 const __reqLogMax = 2000;
+// Unique per-process identity. PROVES the browser and the log-reader are
+// talking to the SAME Render instance: the tracer fetches /api/debug/instance
+// and echoes this ID back in every heartbeat; every log entry carries it too.
+// If the echoed ID ever differs from the ID in the readback response, we are
+// looking at two different instances (or a CDN cache) — no conclusions allowed.
+const __INSTANCE = [
+  process.env.RENDER_INSTANCE_ID || require('os').hostname() || 'unknown',
+  Date.now().toString(36),
+].join('-');
 app.use('/api', (req, res, next) => {
   res.on('finish', () => {
     const entry = {
@@ -143,11 +152,24 @@ app.use('/api', (req, res, next) => {
       ct: String(res.getHeader('content-type') || '').slice(0, 80) || null,
       ref: String(req.headers.referer || '').slice(0, 200) || null,
       dest: String(req.headers['sec-fetch-dest'] || ''),
+      inst: __INSTANCE,
     };
     __reqLog.push(entry);
     if (__reqLog.length > __reqLogMax) __reqLog.shift();
   });
   next();
+});
+
+// Instance identity + build stamp, served with no-store so a CDN can never
+// answer it from cache. The tracer reads this on boot and reports it back.
+app.get('/api/debug/instance', (req, res) => {
+  res.set('Cache-Control', 'no-store, max-age=0');
+  res.set('Pragma', 'no-cache');
+  res.json({
+    instance: __INSTANCE,
+    build: '150d872',
+    boot: new Date().toISOString(),
+  });
 });
 
 // Client trace upload + readback are defined BELOW, after the CSRF/billing
@@ -346,16 +368,20 @@ app.use('/api', async (req, res, next) => {
 app.post('/api/debug/trace', async (req, res) => {
   const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
   const shop = (req.query.shop || '').toString().slice(0, 100);
-  __clientTrace.push({ t: new Date().toISOString().slice(11, 23), shop, n: lines.length, lines: lines.slice(-500) });
+  __clientTrace.push({ t: new Date().toISOString().slice(11, 23), shop, n: lines.length, inst: __INSTANCE, lines: lines.slice(-500) });
   if (__clientTrace.length > 50) __clientTrace.shift();
-  res.json({ ok: true });
+  res.json({ ok: true, instance: __INSTANCE });
 });
 
 app.get('/api/debug/trace', (req, res) => {
   if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
     return res.status(403).json({ error: 'forbidden' });
   }
-  res.json({ requests: __reqLog.slice(-500), clientTrace: __clientTrace.slice(-10) });
+  res.json({
+    reader: { instance: __INSTANCE },
+    requests: __reqLog.slice(-500),
+    clientTrace: __clientTrace.slice(-10),
+  });
 });
 
 // ─── Static Pages ─────────────────────────────────────────────────────────

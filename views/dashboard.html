@@ -540,13 +540,35 @@
       // ── 9. Upload the trace ring to the server — survives the navigation
       // even when THIS document is replaced by the blob. Keepalive fetch on
       // pagehide + a 2s heartbeat so the evidence reaches /api/debug/trace.
+      // Each upload carries the page's BUILD stamp AND the instance ID the
+      // page fetched from /api/debug/instance — the server compares these to
+      // prove browser and log-reader are on the SAME deployment instance.
+      let __traceServerInstance = null;
+      try {
+        fetch('/api/debug/instance', { cache: 'no-store' })
+          .then(r => r.json())
+          .then(d => {
+            __traceServerInstance = d.instance;
+            trace('instance probe', {
+              instance: d.instance,
+              build: d.build,
+              boot: d.boot,
+              myBuild: __BUILD,
+            });
+          })
+          .catch(e => trace('instance probe err', { err: String(e) }));
+      } catch (_) {}
       function uploadTrace() {
         try {
           const qShop = new URLSearchParams(location.search).get('shop') || '';
           fetch('/api/debug/trace?shop=' + encodeURIComponent(qShop), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lines: ring.slice() }),
+            body: JSON.stringify({
+              lines: ring.slice(),
+              build: __BUILD,
+              instance: __traceServerInstance,
+            }),
             keepalive: true,
           }).catch(() => {});
         } catch (_) {}
