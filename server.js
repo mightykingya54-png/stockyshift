@@ -114,6 +114,15 @@ app.use(express.json({
   }
 }));
 app.use(express.urlencoded({ extended: true }));
+
+// API responses must never be cached. Safari aggressively caches GET
+// fetch() responses without Cache-Control and serves STALE JSON (e.g. an
+// old billing status, pre-heal) after a redeploy or billing heal — which
+// looks like the app is broken when the server already fixed itself.
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 app.use(session({
   store: SessionStore,
   secret: process.env.SESSION_SECRET || (() => {
