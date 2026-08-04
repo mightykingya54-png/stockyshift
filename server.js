@@ -495,17 +495,8 @@ app.get('/auth/callback', rateLimit({ windowMs: 60 * 1000, max: 30 }), async (re
       // stores get the App Pricing subscription lookup below.
       let isDevStore = false;
       try {
-        const shopInfo = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-          query: `{ shop { plan { partnerType } } }`,
-        }, {
-          headers: { 'X-Shopify-Access-Token': accessToken, 'Content-Type': 'application/json' },
-          timeout: 8000,
-        });
-        const partnerType = shopInfo.data?.data?.shop?.plan?.partnerType;
-        console.log(`[OAuth] ${shop} partnerType=${partnerType || 'unknown'}`);
-        if (['affiliate', 'staff', 'shopify_plus_partner', 'partner_test'].includes(partnerType)) {
-          isDevStore = true;
-        }
+        isDevStore = await detectDevStore(shop, accessToken);
+        console.log(`[OAuth] ${shop} dev-store detection: ${isDevStore}`);
       } catch (err) {
         console.warn(`[OAuth] ${shop} plan-type check failed: ${err.message} — assuming production`);
       }
@@ -1915,6 +1906,37 @@ function isBillingActive(merchant) {
 // Dev-store plan-type cache for the billing status self-heal (10 min TTL).
 const __devStoreCache = new Map(); // shop -> { isDev: bool, at: ms }
 
+// Detect whether a shop is a development store, with a REST fallback.
+// The GraphQL partnerType query can fail transiently (timeout, hiccup);
+// a false negative leaves a dev store stuck behind a paywall. Retry via
+// the REST shop.json plan_name when GraphQL fails or returns nothing.
+const DEV_PLAN_TYPES = ['affiliate', 'staff', 'shopify_plus_partner', 'partner_test'];
+async function detectDevStore(shop, token) {
+  try {
+    const gql = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+      query: `{ shop { plan { partnerType } } }`,
+    }, {
+      headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+      timeout: 8000,
+    });
+    const pt = gql.data?.data?.shop?.plan?.partnerType;
+    if (pt) return DEV_PLAN_TYPES.includes(pt);
+  } catch (err) {
+    console.warn(`[DevDetect] GraphQL plan check failed for ${shop}: ${err.message} — trying REST fallback`);
+  }
+  try {
+    const rest = await axios.get(`https://${shop}/admin/api/${API_VERSION}/shop.json`, {
+      headers: { 'X-Shopify-Access-Token': token },
+      timeout: 8000,
+    });
+    const planName = String(rest.data?.shop?.plan_name || '').toLowerCase();
+    return ['affiliate', 'staff', 'partner_test', 'development'].some(p => planName.includes(p));
+  } catch (err) {
+    console.warn(`[DevDetect] REST plan check failed for ${shop}: ${err.message}`);
+    return false;
+  }
+}
+
 app.get('/api/billing/status', async (req, res) => {
   const shop = requireShop(req, res);
   if (!shop) return;
@@ -1940,15 +1962,7 @@ app.get('/api/billing/status', async (req, res) => {
       if (isDevStore === null) {
         const token = await getToken(shop);
         if (token) {
-          const shopInfo = await axios.post(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-            query: `{ shop { plan { partnerType } } }`,
-          }, {
-            headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
-            timeout: 8000,
-          });
-          isDevStore = ['affiliate', 'staff', 'shopify_plus_partner', 'partner_test'].includes(
-            shopInfo.data?.data?.shop?.plan?.partnerType
-          );
+          isDevStore = await detectDevStore(shop, token);
           __devStoreCache.set(shop, { isDev: isDevStore, at: Date.now() });
         }
       }
@@ -1956,7 +1970,7 @@ app.get('/api/billing/status', async (req, res) => {
         const prev = merchant.billing_status;
         const trialEnd = new Date();
         trialEnd.setDate(trialEnd.getDate() + BILLING_PLAN.trial_days);
-        await db.run(`UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, trial_used = 1 WHERE shop = $2`, [trialEnd.toISOString(), shop]);
+        await db.run(`UPDATE merchants SET billing_status = 'trial', trial_ends_at = $1, trial_used = 1, trial_heal_note = $2 WHERE shop = $3`, [trialEnd.toISOString(), `dev-store self-heal (was '${prev}')`, shop]);
         merchant.billing_status = 'trial';
         merchant.trial_ends_at = trialEnd.toISOString();
         console.log(`[Billing] ${shop} dev store healed to trial (was stuck at '${prev}')`);
