@@ -150,23 +150,9 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Client trace upload — session-authed (the app iframe carries the cookie).
-app.post('/api/debug/trace', async (req, res) => {
-  const shop = requireShop(req, res);
-  if (!shop) return;
-  const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
-  __clientTrace.push({ t: new Date().toISOString().slice(11, 23), shop, n: lines.length, lines: lines.slice(-500) });
-  if (__clientTrace.length > 50) __clientTrace.shift();
-  res.json({ ok: true });
-});
+// Client trace upload + readback are defined BELOW, after the session
+// middleware (requireShop reads req.session.shop — it 401s otherwise).
 
-// Readback — key-gated (curl from terminal).
-app.get('/api/debug/trace', (req, res) => {
-  if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  res.json({ requests: __reqLog.slice(-500), clientTrace: __clientTrace.slice(-10) });
-});
 app.use(session({
   store: SessionStore,
   secret: process.env.SESSION_SECRET || (() => {
@@ -183,6 +169,25 @@ app.use(session({
     secure: process.env.NODE_ENV === 'production',
   },
 }));
+
+// Client trace upload — session-authed (the app iframe carries the cookie).
+// Registered AFTER the session middleware so requireShop() sees req.session.
+app.post('/api/debug/trace', async (req, res) => {
+  const shop = requireShop(req, res);
+  if (!shop) return;
+  const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
+  __clientTrace.push({ t: new Date().toISOString().slice(11, 23), shop, n: lines.length, lines: lines.slice(-500) });
+  if (__clientTrace.length > 50) __clientTrace.shift();
+  res.json({ ok: true });
+});
+
+// Readback — key-gated (curl from terminal).
+app.get('/api/debug/trace', (req, res) => {
+  if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  res.json({ requests: __reqLog.slice(-500), clientTrace: __clientTrace.slice(-10) });
+});
 
 // Malformed JSON bodies → 400, not 500. body-parser's parse errors (SyntaxError
 // with entity.parse.failed) would otherwise fall through to the global error
