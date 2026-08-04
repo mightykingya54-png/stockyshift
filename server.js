@@ -19,6 +19,48 @@ const SessionStore = new SqliteStore({
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ─── TEMPORARY DEBUG: catch-all request log (REMOVE BEFORE LAUNCH) ────────
+// Mounted as the VERY FIRST middleware — before security headers, body
+// parsing, sessions, auth, billing, and every route. Logs EVERY incoming
+// request on ANY path (/, /dashboard.html, /api/..., webhooks, static) with
+// the full URL, method, Host, Referer, User-Agent, sec-fetch-dest and the
+// response status. Purpose: prove, from the server side, whether the hidden
+// download iframe ever navigates to /api/.../export?dl=... (a real iframe
+// navigation carries sec-fetch-dest: iframe; a fetch carries sec-fetch-dest:
+// empty — the two are distinguishable in this log).
+const __reqLog = [];
+const __clientTrace = [];
+const __reqLogMax = 2000;
+// Unique per-process identity. The suffix is Date.now().toString(36) captured
+// at process start — it NEVER changes during the process lifetime, so the ID
+// proves browser and log-reader are on the SAME Render instance. (The "boot"
+// field in /api/debug/instance is NOT boot time — it is new Date() at request
+// time; do not use it to detect restarts.)
+const __INSTANCE = [
+  process.env.RENDER_INSTANCE_ID || require('os').hostname() || 'unknown',
+  Date.now().toString(36),
+].join('-');
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    const entry = {
+      t: new Date().toISOString().slice(11, 23),
+      m: req.method,
+      url: String(req.originalUrl || req.url || '').slice(0, 300),
+      host: String(req.headers.host || '').slice(0, 80) || null,
+      ref: String(req.headers.referer || '').slice(0, 200) || null,
+      ua: String(req.headers['user-agent'] || '').slice(0, 120) || null,
+      dest: String(req.headers['sec-fetch-dest'] || ''),
+      site: String(req.headers['sec-fetch-site'] || ''),
+      status: res.statusCode,
+      ct: String(res.getHeader('content-type') || '').slice(0, 80) || null,
+      inst: __INSTANCE,
+    };
+    __reqLog.push(entry);
+    if (__reqLog.length > __reqLogMax) __reqLog.shift();
+  });
+  next();
+});
+
 // ─── Rate limiting (simple in-memory fixed-window) ────────────────────────
 // Protects /auth and /auth/callback from oauth_states table flooding (an
 // attacker hitting /auth?shop=x repeatedly grows the oauth_states table faster
@@ -121,42 +163,6 @@ app.use(express.urlencoded({ extended: true }));
 // looks like the app is broken when the server already fixed itself.
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
-  next();
-});
-
-// ─── TEMPORARY DEBUG: request log + client trace capture (REMOVE BEFORE LAUNCH)
-// Proves what Safari requests after Export CSV without Web Inspector access:
-// every /api request (URL, status, content-type, Referer, sec-fetch-dest) is
-// recorded; the client tracer uploads its navigation ring to /api/debug/trace.
-// If Safari navigates to /dashboard.html or /api/... the server SEES it here.
-// If the visible document is a blob, no second request appears — conclusive.
-const __reqLog = [];
-const __clientTrace = [];
-const __reqLogMax = 2000;
-// Unique per-process identity. PROVES the browser and the log-reader are
-// talking to the SAME Render instance: the tracer fetches /api/debug/instance
-// and echoes this ID back in every heartbeat; every log entry carries it too.
-// If the echoed ID ever differs from the ID in the readback response, we are
-// looking at two different instances (or a CDN cache) — no conclusions allowed.
-const __INSTANCE = [
-  process.env.RENDER_INSTANCE_ID || require('os').hostname() || 'unknown',
-  Date.now().toString(36),
-].join('-');
-app.use('/api', (req, res, next) => {
-  res.on('finish', () => {
-    const entry = {
-      t: new Date().toISOString().slice(11, 23),
-      m: req.method,
-      url: String(req.originalUrl || '').slice(0, 300),
-      status: res.statusCode,
-      ct: String(res.getHeader('content-type') || '').slice(0, 80) || null,
-      ref: String(req.headers.referer || '').slice(0, 200) || null,
-      dest: String(req.headers['sec-fetch-dest'] || ''),
-      inst: __INSTANCE,
-    };
-    __reqLog.push(entry);
-    if (__reqLog.length > __reqLogMax) __reqLog.shift();
-  });
   next();
 });
 
