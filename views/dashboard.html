@@ -399,10 +399,12 @@
     });
 
     // ══════════════════════════════════════════════════════════════════════
-    // TEMPORARY NAVIGATION TRACING — diagnose "app shows JS/text after Export"
-    // Instruments every navigation vector + fetch + lifecycle event, logs to
-    // console AND a persistent ring buffer (localStorage) so the trace survives
-    // even if this very document gets navigated away.
+    // TEMPORARY NAVIGATION + DOM TRACING — diagnose "app shows JS/text after Export"
+    // Part A (nav/fetch): proves whether a navigation happened (it did NOT —
+    // heartbeats survive the click, so the text overlay is NOT a navigation).
+    // Part B (DOM): finds WHICH DOM node renders the text — MutationObserver,
+    // huge text nodes, suspect elements, appendChild/insertBefore stacks,
+    // whole-body length swap detection.
     // REMOVE THIS BLOCK BEFORE LAUNCH.
     // ══════════════════════════════════════════════════════════════════════
     (function installNavTracing() {
@@ -537,7 +539,102 @@
         }
       }, true);
 
-      // ── 9. Upload the trace ring to the server — survives the navigation
+      // ── 9. DOM instrumentation — find WHAT renders the text overlay.
+      // Navigation was disproven (heartbeats survived the click), so the
+      // visible text must be a DOM node (or a whole body swap) inside THIS
+      // document. Observe everything; flag big text + suspicious elements.
+      const __SUSPECT_TAGS = new Set(['PRE', 'IFRAME', 'OBJECT', 'EMBED', 'TEXTAREA', 'SCRIPT', 'STYLE', 'XMP', 'PLAINTEXT', 'SVG', 'CANVAS', 'VIDEO', 'AUDIO']);
+      function __desc(n) {
+        try {
+          if (!n || n.nodeType !== 1) return null;
+          return { tag: n.tagName || '?', id: String(n.id || '').slice(0, 40), cls: String(n.className || '').slice(0, 40), connected: !!n.isConnected };
+        } catch (_) { return null; }
+      }
+      function __directTextLen(el) {
+        let len = 0;
+        try { for (const c of el.childNodes || []) if (c.nodeType === 3) len += (c.textContent || '').length; } catch (_) {}
+        return len;
+      }
+      let __lastBodyLen = -1;
+      try { __lastBodyLen = document.body ? document.body.textContent.length : -1; } catch (_) {}
+      const __mo = new MutationObserver((muts) => {
+        for (const m of muts) {
+          for (const node of m.addedNodes) {
+            if (node.nodeType === 3) {
+              const len = (node.textContent || '').length;
+              if (len > 1000) {
+                trace('DOM: HUGE TEXT NODE added', {
+                  len,
+                  head: String(node.textContent).slice(0, 120),
+                  parent: __desc(node.parentElement),
+                  stack: (new Error().stack || '').split('\n').slice(1, 5).join(' | '),
+                });
+              }
+              continue;
+            }
+            if (node.nodeType !== 1) continue;
+            const d = __desc(node);
+            if (!d) continue;
+            if (__SUSPECT_TAGS.has(d.tag)) {
+              const dt = __directTextLen(node);
+              trace('DOM: ' + d.tag + ' element added', { ...d, directTextLen: dt, head: (node.textContent || '').slice(0, 80) });
+            }
+            const dt = __directTextLen(node);
+            if (dt > 1000) {
+              trace('DOM: large text container added', { ...d, directTextLen: dt, head: (node.textContent || '').slice(0, 100) });
+            }
+          }
+        }
+      });
+      try {
+        __mo.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+        trace('DOM observer active');
+      } catch (e) { trace('DOM observer FAILED', { err: String(e) }); }
+
+      // Whole-document swap detection: body textContent length jumping by
+      // thousands in one poll = the document was replaced from within.
+      setInterval(() => {
+        try {
+          if (!document.body) return;
+          const len = document.body.textContent.length;
+          if (len !== __lastBodyLen) {
+            trace('DOM: body textContent length changed', {
+              from: __lastBodyLen, to: len, diff: len - __lastBodyLen,
+              head: document.body.textContent.slice(0, 100),
+              stack: (new Error().stack || '').split('\n').slice(1, 5).join(' | '),
+            });
+            __lastBodyLen = len;
+          }
+        } catch (_) {}
+      }, 1000);
+
+      // Creator stack for ANY huge text node / suspect element inserted via
+      // the DOM API (catches code paths that build the overlay programmatically).
+      try {
+        const __origAppendChild = Node.prototype.appendChild;
+        Node.prototype.appendChild = function (child) {
+          try {
+            if (child && child.nodeType === 3 && (child.textContent || '').length > 1000) {
+              trace('DOM: HUGE appendChild stack', { len: child.textContent.length, stack: (new Error().stack || '').split('\n').slice(1, 6).join(' | ') });
+            }
+            if (child && child.nodeType === 1 && __SUSPECT_TAGS.has(child.tagName) && child.isConnected) {
+              trace('DOM: ' + child.tagName + ' appendChild stack', { stack: (new Error().stack || '').split('\n').slice(1, 6).join(' | ') });
+            }
+          } catch (_) {}
+          return __origAppendChild.call(this, child);
+        };
+        const __origInsertBefore = Node.prototype.insertBefore;
+        Node.prototype.insertBefore = function (child, ref) {
+          try {
+            if (child && child.nodeType === 3 && (child.textContent || '').length > 1000) {
+              trace('DOM: HUGE insertBefore stack', { len: child.textContent.length, stack: (new Error().stack || '').split('\n').slice(1, 6).join(' | ') });
+            }
+          } catch (_) {}
+          return __origInsertBefore.call(this, child, ref);
+        };
+      } catch (_) {}
+
+      // ── 10. Upload the trace ring to the server — survives the navigation
       // even when THIS document is replaced by the blob. Keepalive fetch on
       // pagehide + a 2s heartbeat so the evidence reaches /api/debug/trace.
       // Each upload carries the page's BUILD stamp AND the instance ID the
