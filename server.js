@@ -150,8 +150,8 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Client trace upload + readback are defined BELOW, after the session
-// middleware (requireShop reads req.session.shop — it 401s otherwise).
+// Client trace upload + readback are defined BELOW, after the CSRF/billing
+// middleware (the /debug path is billing-exempt; readback is key-gated).
 
 app.use(session({
   store: SessionStore,
@@ -169,25 +169,6 @@ app.use(session({
     secure: process.env.NODE_ENV === 'production',
   },
 }));
-
-// Client trace upload — session-authed (the app iframe carries the cookie).
-// Registered AFTER the session middleware so requireShop() sees req.session.
-app.post('/api/debug/trace', async (req, res) => {
-  const shop = requireShop(req, res);
-  if (!shop) return;
-  const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
-  __clientTrace.push({ t: new Date().toISOString().slice(11, 23), shop, n: lines.length, lines: lines.slice(-500) });
-  if (__clientTrace.length > 50) __clientTrace.shift();
-  res.json({ ok: true });
-});
-
-// Readback — key-gated (curl from terminal).
-app.get('/api/debug/trace', (req, res) => {
-  if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  res.json({ requests: __reqLog.slice(-500), clientTrace: __clientTrace.slice(-10) });
-});
 
 // Malformed JSON bodies → 400, not 500. body-parser's parse errors (SyntaxError
 // with entity.parse.failed) would otherwise fall through to the global error
@@ -354,6 +335,27 @@ app.use('/api', async (req, res, next) => {
     console.error('[Billing] Enforcement check failed:', e.message);
     next(); // fail open on DB error, auth still applies
   }
+});
+
+// ─── TEMPORARY DEBUG: client trace upload + key-gated readback (REMOVE BEFORE LAUNCH)
+// Upload does NOT require session auth: the embedded iframe authenticates via
+// App Bridge Bearer tokens, and the session cookie is not guaranteed present
+// in that context (which caused 401s). The CSRF middleware above still
+// origin-checks this POST (stockyshift.com / admin.shopify.com only).
+// The readback is gated by DEBUG_KEY so the ring is never exposed publicly.
+app.post('/api/debug/trace', async (req, res) => {
+  const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
+  const shop = (req.query.shop || '').toString().slice(0, 100);
+  __clientTrace.push({ t: new Date().toISOString().slice(11, 23), shop, n: lines.length, lines: lines.slice(-500) });
+  if (__clientTrace.length > 50) __clientTrace.shift();
+  res.json({ ok: true });
+});
+
+app.get('/api/debug/trace', (req, res) => {
+  if (!process.env.DEBUG_KEY || req.query.key !== process.env.DEBUG_KEY) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  res.json({ requests: __reqLog.slice(-500), clientTrace: __clientTrace.slice(-10) });
 });
 
 // ─── Static Pages ─────────────────────────────────────────────────────────
