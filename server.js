@@ -1948,7 +1948,7 @@ app.get('/api/debug/merchant', async (req, res) => {
     return res.status(400).json({ error: 'shop required' });
   }
   const m = await db.get(
-    'SELECT shop, billing_status, trial_used, is_active, uninstalled_at, trial_ends_at, shopify_charge_id, LENGTH(access_token) AS token_len, expires_at, created_at FROM merchants WHERE shop = $1',
+    'SELECT shop, billing_status, trial_used, is_active, uninstalled_at, trial_ends_at, shopify_charge_id, LENGTH(access_token) AS token_len, expires_at, installed_at FROM merchants WHERE shop = $1',
     [shop]
   );
   if (!m) return res.json({ not_found: true });
