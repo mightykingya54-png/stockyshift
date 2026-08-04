@@ -167,7 +167,7 @@ app.get('/api/debug/instance', (req, res) => {
   res.set('Pragma', 'no-cache');
   res.json({
     instance: __INSTANCE,
-    build: 'c050e65',
+    build: 'ca3bb93',
     boot: new Date().toISOString(),
   });
 });
