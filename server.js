@@ -1970,6 +1970,16 @@ app.get('/api/debug/merchant', async (req, res) => {
         subs: (r.data?.data?.currentAppInstallation?.activeSubscriptions || []).map(s => ({ id: s.id, status: s.status })),
         errors: r.data?.errors || null,
       };
+      // REST fallback probe: what does plan_name report for this shop?
+      try {
+        const rest = await axios.get(`https://${shop}/admin/api/${API_VERSION}/shop.json`, {
+          headers: { 'X-Shopify-Access-Token': token },
+          timeout: 8000,
+        });
+        probe.rest_plan_name = rest.data?.shop?.plan_name ?? null;
+      } catch (restErr) {
+        probe.rest_error = restErr.message;
+      }
     }
   } catch (e) {
     probe = { error: e.message };
