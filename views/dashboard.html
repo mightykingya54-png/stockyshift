@@ -729,11 +729,19 @@
         } catch (_) {}
         throw new Error(detail);
       }
+      // Content-aware success path: CSV export endpoints return text/* (not JSON).
+      // res.json() on raw CSV throws a parse error and breaks the download, so
+      // return the raw text when the server says it's CSV. Every other endpoint
+      // returns application/json and is parsed as before — no caller is affected.
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('text/csv') || contentType.includes('application/octet-stream')) {
+        return res.text();
+      }
       return res.json();
     }
 
     // ─── CSV export (warm signed token; Safari window.open / others iframe) ──
-    const __BUILD = '2e4f3bc'; // shown in Settings; used to verify live build vs cached page
+    const __BUILD = 'a1c9e02'; // shown in Settings; used to verify live build vs cached page
     // Pattern: (1) the signed token is kept WARM (prefetched on tab load +
     // refreshed every 30s) so the click handler triggers the download
     // SYNCHRONOUSLY — Safari drops downloads when an await sits between the
@@ -757,38 +765,38 @@
     }
     setInterval(() => { ensureDownloadToken().catch(() => {}); }, 30000);
 
-    const __isSafari = /^((?!chrome|chromium|crios|edg|fxios|opr).)*safari/i.test(navigator.userAgent);
-
-    function triggerExportDownload(path, token) {
-      const url = path + (path.includes('?') ? '&' : '?') + 'dl=' + encodeURIComponent(token);
-      if (__isSafari) {
-        // Same task as the click → user activation intact → Safari allows the
-        // top-level navigation and downloads the attachment. Never touches the
-        // visible iframe. No await anywhere before this line.
-        try { window.open(url, '_blank', 'noopener'); } catch (_) { /* popup blocked */ }
-        return;
-      }
-      // Edge/Chrome: hidden iframe download — app page never navigates.
-      const iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.src = url;
-      document.body.appendChild(iframe);
-      setTimeout(() => { if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe); }, 8000);
-    }
-
+    // CSV export: fetch the bytes with the authenticated api() client, wrap them
+    // in a Blob typed as application/octet-stream, and trigger via an <a download>
+    // click. application/octet-stream forces every browser — INCLUDING Safari —
+    // to download the file instead of rendering it inline. Safari's old window.open
+    // path (and iframe path) rendered text/csv as a page of text covering the app
+    // because Content-Disposition: attachment is ignored for text/* in browsing
+    // contexts. Blob download never navigates, so the app is never replaced.
     async function downloadCsv(path, filename) {
       const exportBtn = document.activeElement;
       const originalLabel = exportBtn ? exportBtn.textContent : null;
       if (exportBtn) { exportBtn.disabled = true; exportBtn.textContent = 'Exporting...'; }
+      let blobUrl = null;
       try {
-        // Warm token → resolves via microtask only, still inside the click's
-        // activation window in every browser.
-        const token = await ensureDownloadToken();
-        triggerExportDownload(path, token);
+        // api() attaches the Bearer session token; fetch Response → text (CSV is text).
+        const csvText = await api(path);
+        const csvString = typeof csvText === 'string' ? csvText : String(csvText ?? '');
+        // application/octet-stream = "I don't know what this is" → browser MUST download.
+        // text/csv would let Safari render it inline (the bug this fixes).
+        const blob = new Blob([csvString], { type: 'application/octet-stream' });
+        blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = filename; // suggests filename; browser downloads, never navigates
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
         showToast('Export started — check your downloads', 'success');
       } catch (e) {
         showToast('Export failed: ' + e.message, 'error');
       } finally {
+        // Free the blob URL after the click has been processed by the browser.
+        if (blobUrl) setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
         if (exportBtn) { exportBtn.disabled = false; if (originalLabel) exportBtn.textContent = originalLabel; }
       }
     }
@@ -927,7 +935,7 @@
         let html = `<div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">📦 ${data.length} Products</h2>
-            <button class="btn btn-outline btn-sm" onclick="exportProducts()">⬇ Export CSV</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="exportProducts(); return false;">⬇ Export CSV</button>
           </div>
           <table>
           <tr><th>Product</th><th>SKU</th><th>Stock</th><th>Reorder Point</th><th>Vendor</th><th></th></tr>`;
@@ -1157,7 +1165,7 @@
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">📄 Purchase Orders</h2>
             <div>
-              <button class="btn btn-outline btn-sm" onclick="exportOrders()" style="margin-right:6px">⬇ Export CSV</button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="exportOrders(); return false;" style="margin-right:6px">⬇ Export CSV</button>
               <button class="btn btn-success btn-sm" onclick="showCreatePOMulti()">+ New PO</button>
             </div>
           </div>`;
