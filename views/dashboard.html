@@ -745,26 +745,19 @@
       return res.json();
     }
 
-    // ─── CSV export (warm signed token + top-level download via App Bridge) ──
+    // ─── CSV export (warm signed token + browser-native download) ──
     const __BUILD = '654a912'; // shown in Settings; used to verify live build vs cached page
-    // Delivery pattern:
-    //   EMBEDDED → Redirect.create(app).dispatch(Redirect.Action.REMOTE, url)
-    //   The Redirect action set "allows you to modify the top-level browser
-    //   URL". The top-level window (Shopify admin) navigates to the signed
-    //   attachment URL; the browser honors Content-Disposition: attachment and
-    //   DOWNLOADS without painting anything.
-    //   STANDALONE → window.open(url, '_blank') — same attachment response,
-    //   download starts in the new tab.
-    // TEST IN PROGRESS (one change only): the URL passed to REMOTE was
-    //   relative ('/api/products/export?shop=..&dl=..'). App Bridge v3 docs
-    //   define REMOTE as "Redirect to an absolute URL outside of the app",
-    //   and list "The use of query params is not supported. All query params
-    //   are removed from the path during the redirect." — the host strips
-    //   ?shop&dl and resolves the relative path against admin.shopify.com, so
-    //   /api/products/export on stockyshift.com is never requested. The ONLY
-    //   change in this build: window.location.origin prefix → REMOTE now
-    //   receives 'https://stockyshift.com/api/products/export?...'. If the
-    //   absolute URL fixes the download, root cause confirmed.
+    // Delivery pattern (Matrixify-verified, 2026-08-05):
+    //   App Bridge Redirect.Action.REMOTE was REMOVED from the download path —
+    //   it silently no-ops on the current admin host (v3 npm App Bridge is
+    //   legacy; the CDN app-bridge.js has no Redirect action at all). Matrixify
+    //   downloads with a plain browser navigation to a server URL that returns
+    //   Content-Disposition: attachment (via 307 → presigned S3). Our server
+    //   returns the same attachment header directly, so we let the BROWSER
+    //   navigate: window.open(url, '_blank') from the click gesture; if the
+    //   popup is blocked, fall back to window.top.location.href (Safari honors
+    //   Content-Disposition and downloads without painting), with a final
+    //   fallback to same-frame location.href.
     // The signed 60s token is kept WARM so the click handler never waits on
     // the network.
     let __dlToken = null;
@@ -790,22 +783,19 @@
         // Now: prefixed with the app origin so dispatch receives
         // 'https://stockyshift.com/api/products/export?shop=...&dl=...'.
         const url = window.location.origin + path + (path.includes('?') ? '&' : '?') + 'dl=' + encodeURIComponent(token);
-        if (isEmbedded && __appBridgeApp && __appBridgeRedirect) {
-          // Ensure App Bridge init finished (dynamic imports + token prime)
-          if (__appBridgeReady) {
-            await Promise.race([
-              __appBridgeReady,
-              new Promise((resolve) => setTimeout(resolve, 3000)),
-            ]);
+        // Delivery (Matrixify-verified pattern): let the BROWSER navigate to
+        // the signed attachment URL — no App Bridge involved. Our server
+        // returns Content-Disposition: attachment, so Safari downloads the
+        // file instead of painting anything (same behavior Matrixify gets
+        // from its 307 → S3 hop). window.open from a user gesture is allowed;
+        // if the popup is blocked, fall back to top-level navigation.
+        const win = window.open(url, '_blank');
+        if (!win) {
+          try {
+            window.top.location.href = url;
+          } catch {
+            window.location.href = url;
           }
-          // Top-level navigation to the signed attachment URL → browser
-          // downloads, admin stays put, app iframe untouched.
-          __appBridgeRedirect.create(__appBridgeApp).dispatch(__appBridgeRedirect.Action.REMOTE, url);
-        } else {
-          // Standalone (non-embedded) mode: open the attachment URL in a new
-          // tab. Content-Disposition: attachment makes it download, leaving
-          // the app tab untouched.
-          window.open(url, '_blank');
         }
         showToast('Export started — check your downloads', 'success');
       } catch (e) {
