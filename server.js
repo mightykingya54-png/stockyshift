@@ -1832,7 +1832,7 @@ app.get('/api/purchase-orders/export', async (req, res) => {
     lines.push([p.po_number, p.vendor_name, p.vendor_email, p.status, p.total, p.created_at, p.emailed_at, p.received_at, p.notes].map(esc).join(','));
   }
 
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Type', 'application/octet-stream'); // EXPERIMENT: MIME-type test (was text/csv)
   res.setHeader('Content-Disposition', `attachment; filename="stockyshift-pos-${shop.replace(/[^a-z0-9]/gi, '')}.csv"`);
   res.send('\uFEFF' + lines.join('\r\n')); // BOM for Excel
 });
