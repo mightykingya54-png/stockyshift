@@ -1028,8 +1028,14 @@
       };
     }
 
-    async function downloadCsv(path, filename) {
-      const exportBtn = document.activeElement;
+    async function downloadCsv(path, filename, btn) {
+      // BUGFIX: the button must be passed explicitly. Previously this read
+      // document.activeElement, which is <body> whenever the button isn't
+      // focused (Safari never focuses buttons on click, synthetic clicks
+      // don't focus either). Setting body.textContent = 'Exporting...'
+      // destroyed the entire dashboard DOM — the "text overlay" seen in
+      // merchant browsers. The download itself always worked; the UI died.
+      const exportBtn = (btn && btn.nodeType === 1 && btn.tagName === 'BUTTON') ? btn : null;
       const originalLabel = exportBtn ? exportBtn.textContent : null;
       if (exportBtn) { exportBtn.disabled = true; exportBtn.textContent = 'Exporting...'; }
       try {
@@ -1168,11 +1174,11 @@
 
     // ─── Export CSV (thin wrappers around the auth'd download helper) ──
     // Filenames mirror the server's Content-Disposition so saved files are consistent.
-    function exportProducts() {
-      downloadCsv(`/api/products/export?shop=${encodeURIComponent(shop)}`, `stockyshift-products-${shop.replace(/[^a-z0-9]/gi, '')}.csv`);
+    function exportProducts(btn) {
+      downloadCsv(`/api/products/export?shop=${encodeURIComponent(shop)}`, `stockyshift-products-${shop.replace(/[^a-z0-9]/gi, '')}.csv`, btn);
     }
-    function exportOrders() {
-      downloadCsv(`/api/purchase-orders/export?shop=${encodeURIComponent(shop)}`, `stockyshift-pos-${shop.replace(/[^a-z0-9]/gi, '')}.csv`);
+    function exportOrders(btn) {
+      downloadCsv(`/api/purchase-orders/export?shop=${encodeURIComponent(shop)}`, `stockyshift-pos-${shop.replace(/[^a-z0-9]/gi, '')}.csv`, btn);
     }
 
     async function loadProducts() {
@@ -1194,7 +1200,7 @@
         let html = `<div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">📦 ${data.length} Products</h2>
-            <button type="button" class="btn btn-outline btn-sm" onclick="exportProducts(); return false;">⬇ Export CSV</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="exportProducts(this); return false;">⬇ Export CSV</button>
           </div>
           <table>
           <tr><th>Product</th><th>SKU</th><th>Stock</th><th>Reorder Point</th><th>Vendor</th><th></th></tr>`;
@@ -1424,7 +1430,7 @@
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">📄 Purchase Orders</h2>
             <div>
-              <button type="button" class="btn btn-outline btn-sm" onclick="exportOrders(); return false;" style="margin-right:6px">⬇ Export CSV</button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="exportOrders(this); return false;" style="margin-right:6px">⬇ Export CSV</button>
               <button class="btn btn-success btn-sm" onclick="showCreatePOMulti()">+ New PO</button>
             </div>
           </div>`;
