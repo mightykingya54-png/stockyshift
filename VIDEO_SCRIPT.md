@@ -96,7 +96,7 @@ visible in the PO row — do NOT click it on camera; narration only.)
 > "Every purchase order exports as a clean CSV file — keep it for your records,
 > or open it in the tools you already use. And when your supplier needs something
 > more official, Send emails the PO straight to them with a ready-to-print PDF
-> attached. The dashboard stays right where it is — no page jumps, no reloads."
+> attached."
 
 ---
 
