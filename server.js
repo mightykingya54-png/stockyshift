@@ -266,7 +266,6 @@ const BILLING_EXEMPT_PATHS = [
   '/billing/cancel',
   '/billing/cancel-pending',
   '/db-health',
-  '/debug',
 ];
 if (process.env.NODE_ENV !== 'production') BILLING_EXEMPT_PATHS.push('/test-email');
 
@@ -2529,24 +2528,6 @@ app.post('/api/billing/cancel', async (req, res) => {
     res.status(500).json({ error: 'Failed to cancel subscription' });
   }
 });
-
-// ─── Debug: check which API key is active (dev only) ─────────────────────
-if (process.env.NODE_ENV !== 'production') {
-app.get('/api/debug', (req, res) => {
-  // Debug-only: hide in production (same guard as /api/db-health)
-  if (process.env.NODE_ENV === 'production') return res.status(403).json({ error: 'Forbidden' });
-  const key = process.env.SHOPIFY_API_KEY || 'NOT SET';
-  res.json({
-    api_key_prefix: key.substring(0, 8) + '...',
-    api_key_length: key.length,
-    app_url: APP_URL,
-    skip_billing: process.env.SKIP_BILLING,
-    billing_test_mode: process.env.BILLING_TEST_MODE,
-    scopes: process.env.SCOPES,
-    node_env: process.env.NODE_ENV,
-  });
-});
-}
 
 // Render healthcheck path — 200 only when the DB is actually reachable.
 // Deliberately unauthenticated (Render pings it without headers); reveals
