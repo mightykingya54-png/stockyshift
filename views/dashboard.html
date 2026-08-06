@@ -747,17 +747,15 @@
 
     // ─── CSV export (warm signed token + browser-native download) ──
     const __BUILD = '654a912'; // shown in Settings; used to verify live build vs cached page
-    // Delivery pattern (Matrixify-verified, 2026-08-05):
-    //   App Bridge Redirect.Action.REMOTE was REMOVED from the download path —
-    //   it silently no-ops on the current admin host (v3 npm App Bridge is
-    //   legacy; the CDN app-bridge.js has no Redirect action at all). Matrixify
-    //   downloads with a plain browser navigation to a server URL that returns
-    //   Content-Disposition: attachment (via 307 → presigned S3). Our server
-    //   returns the same attachment header directly, so we let the BROWSER
-    //   navigate: window.open(url, '_blank') from the click gesture; if the
-    //   popup is blocked, fall back to window.top.location.href (Safari honors
-    //   Content-Disposition and downloads without painting), with a final
-    //   fallback to same-frame location.href.
+    // Delivery pattern (Matrixify-verified from its production bundle,
+    // 2026-08-06):
+    //   Matrixify's "Download Exported File" button downloads with a
+    //   temporary <a> element: href = absolute signed URL, download =
+    //   filename, programmatic .click(), then .remove(). No window.open, no
+    //   App Bridge Redirect, no blobs, no forms, no iframes. The navigation
+    //   happens in the existing browsing context and Safari honors
+    //   Content-Disposition: attachment, so the file downloads without
+    //   opening a tab or repainting the app. We replicate it exactly.
     // The signed 60s token is kept WARM so the click handler never waits on
     // the network.
     let __dlToken = null;
@@ -783,20 +781,13 @@
         // Now: prefixed with the app origin so dispatch receives
         // 'https://stockyshift.com/api/products/export?shop=...&dl=...'.
         const url = window.location.origin + path + (path.includes('?') ? '&' : '?') + 'dl=' + encodeURIComponent(token);
-        // Delivery (Matrixify-verified pattern): let the BROWSER navigate to
-        // the signed attachment URL — no App Bridge involved. Our server
-        // returns Content-Disposition: attachment, so Safari downloads the
-        // file instead of painting anything (same behavior Matrixify gets
-        // from its 307 → S3 hop). window.open from a user gesture is allowed;
-        // if the popup is blocked, fall back to top-level navigation.
-        const win = window.open(url, '_blank');
-        if (!win) {
-          try {
-            window.top.location.href = url;
-          } catch {
-            window.location.href = url;
-          }
-        }
+        // Delivery (Matrixify's exact mechanism): temporary <a> with
+        // absolute href + download attribute, programmatic click, removal.
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        a.remove();
         showToast('Export started — check your downloads', 'success');
       } catch (e) {
         showToast('Export failed: ' + e.message, 'error');
