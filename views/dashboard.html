@@ -746,7 +746,7 @@
     }
 
     // ─── CSV export (warm signed token + browser-native download) ──
-    const __BUILD = '654a912'; // shown in Settings; used to verify live build vs cached page
+    const __BUILD = '654a912'; // build stamp; kept for console verification of live vs cached builds
     // Delivery pattern (Matrixify-verified from its production bundle,
     // 2026-08-06):
     //   Matrixify's "Download Exported File" button downloads with a
@@ -1251,7 +1251,6 @@
               <tr><td style="padding:8px 0;color:#666">Status</td><td><strong>${esc(statusLabel)}</strong></td></tr>
             </table>
             ${statusDetail}
-            <p style="color:#999;font-size:12px;margin-top:12px;font-family:monospace">DEV_SHOW_BILLING=${billing.dev_show_billing ? 'ON' : 'off'} · status=${esc(billing.status)} · trialDaysLeft=${billing.trial_days_left} · build:${__BUILD}</p>
             <div class="btn-row" style="margin-top:16px">
               ${manageBtn}
             </div>
