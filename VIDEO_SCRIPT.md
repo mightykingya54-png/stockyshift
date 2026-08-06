@@ -16,8 +16,8 @@ In Shopify admin → Products, make sure you have:
 | Product | Stock | Reorder point |
 |---|---|---|
 | Ceramic Mug | 2 | 5 |
-| Linen T-Shirt | 4 | **5** (changed to 8 on camera in Scene 2) |
-| Canvas Tote | 15 | 10 |
+| Linen T-Shirt | 4 | 5 |
+| Canvas Tote | 15 | **10** (changed to 20 on camera in Scene 2) |
 
 Vendor: "Sunrise Ceramics" (`contact@sunriseceramics.com`) on the Mug/T-Shirt.
 
@@ -45,13 +45,17 @@ badge, Linen T-Shirt shows "4". No clicks needed.
 
 ## Scene 2 — Reorder points (0:35–1:10)
 
-**Screen:** Products tab → click the reorder point on the T-Shirt → change to 8 → save.
+**Screen:** Products tab → click Edit on Canvas Tote → reorder point 10 →
+change to 20 → Save → **badge flips green → red live on screen** (no refresh).
 
 **Narration:**
-> "Each product has its own reorder point — your minimum healthy stock. For the
-> T-Shirt, let's set it to eight. Save it, and that's it. You set it once, and
-> StockyShift watches from then on — daily automatic sync means your numbers are
-> always current."
+> "Each product has its own reorder point — your minimum healthy stock. The
+> Tote's at fifteen with a reorder point of ten — healthy, no alert. But say you
+> want a bigger buffer. Set it to twenty, save — and watch, StockyShift flags
+> it instantly. Set it once, and it watches from then on — daily automatic sync
+> means your numbers are always current."
+
+**Action:** Pause 2 seconds after the badge flips so viewers see the reaction.
 
 ---
 
