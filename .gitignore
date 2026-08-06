@@ -5,3 +5,4 @@ node_modules/
 *.db-wal
 .DS_Store
 narration/*.mp3
+recordings/
