@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <!-- App Bridge v2 from Shopify's CDN (required for embedded app checks) -->
+  <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
   <title>StockyShift — Purchase Orders & Stock Alerts</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -413,9 +415,12 @@
     document.getElementById('shopName').textContent = shop || '';
 
     // ─── Shopify App Bridge (embedded mode) ────────────────────────
+    // v2 CDN script (cdn.shopify.com/shopifycloud/app-bridge.js) auto-initializes
+    // from the admin's embed context (window.name). Exposes window.shopify with
+    // idToken(). No createApp/Redirect needed — the v3 jsdelivr ESM imports were
+    // replaced so the embedded-app check sees App Bridge served from Shopify's CDN.
     const isEmbedded = window.top !== window.self;
     let __appBridgeApp = null;
-    let __appBridgeRedirect = null;
     let __getSessionToken = null;
     let __appBridgeReady = null;
     let __tokenCache = { token: null, exp: 0 };
@@ -427,20 +432,14 @@
           const config = await configRes.json();
           const host = urlParams.get('host');
           if (!host) return;
-          // NOTE: must import the TRUE ESM builds. The package root served by
-          // unpkg is the UMD build (no ESM exports -> createApp undefined), and
-          // v3.7.11 has NO app.idToken() — that API came in v4. The v3 way is
-          // getSessionToken(app) from the utilities deep import.
-          const [{ createApp }, { getSessionToken }, { Redirect }] = await Promise.all([
-            import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/+esm'),
-            import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/utilities/session-token/+esm'),
-            import('https://cdn.jsdelivr.net/npm/@shopify/app-bridge@3.7.11/actions/Navigation/Redirect/+esm'),
-          ]);
-          __appBridgeApp = createApp({ apiKey: config.api_key, host });
-          __appBridgeRedirect = Redirect;
-          __getSessionToken = getSessionToken;
+          // The CDN script is synchronous in <head>, but guard anyway.
+          while (!window.shopify || typeof window.shopify.idToken !== 'function') {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          __appBridgeApp = window.shopify;
+          __getSessionToken = () => window.shopify.idToken();
           // Prime the token cache
-          __tokenCache.token = await getSessionToken(__appBridgeApp);
+          __tokenCache.token = await window.shopify.idToken();
           __tokenCache.exp = Date.now() + 45 * 60 * 1000; // refresh before ~60min expiry
         } catch (e) {
           console.warn('App Bridge init failed (non-fatal):', e);
