@@ -1,7 +1,12 @@
-# StockyShift — Video Script v2 (Final, ~3:30)
+# StockyShift — Video Script v3 (Re-record for App Store review, ~4:00)
 
-Cut from v1: Scene 1 (Install) removed — recording on a store where the app is
-already installed and the trial is active. Video opens directly in the app.
+Changes from v2:
+- Scene 0 (Install/onboarding) restored — the review guideline asks to show the
+  merchant flow; v2 cut it for convenience.
+- Total runtime target 3:45–4:10 (guideline: 3–8 min; v2 was 2:16, too short).
+- Scene 5 now opens the downloaded CSV on screen (visual proof + seconds).
+- RECORDING QUALITY MUST BE "High" — v1/v2 were captured at "Efficient"
+  (668 kbps, ~13fps) which is why the footage looked soft. Fix below.
 
 **Format:** 1080p screen recording, portion-of-screen, narration at normal volume
 **Title on upload:** StockyShift — Low Stock Alerts & Purchase Orders for Shopify
@@ -9,25 +14,48 @@ already installed and the trial is active. Video opens directly in the app.
 
 ---
 
-## Before recording (10 min prep)
+## Recording setup — DO THIS FIRST (this is what went wrong last time)
 
-In Shopify admin → Products, make sure you have:
+1. `Cmd+Shift+5` → **Options** → **Quality: High** (Efficient is the default and
+   produces the soft 668 kbps footage. High gives 5–20 Mbps.)
+2. Record **portion of screen** — the browser/admin window area, not the full screen
+3. Mute notifications, close other tabs, hide the dock
+4. Mouse: **slow and deliberate** — 1–2 second pause after every click, then move
+5. Hard-refresh the app once before take B so the latest build is live
 
-| Product | Stock | Reorder point |
-|---|---|---|
-| Ceramic Mug | 2 | 5 |
-| Linen T-Shirt | 4 | 5 |
-| Canvas Tote | 15 | **10** (changed to 20 on camera in Scene 2) |
-
-Vendor: "Sunrise Ceramics" (`contact@sunriseceramics.com`) on the Mug/T-Shirt.
-
-- Mute notifications, close other tabs, hide the dock
-- Record with Cmd+Shift+5 (portion of screen), 1080p
-- Hard-refresh the app once so the latest build (clean Settings, no diagnostic line) is live
+Two takes, assembled afterwards (you will NOT see a cut between them in the final):
 
 ---
 
-## Scene 1 — The problem (0:00–0:35)
+## Take A — Scene 0: Install (0:00–0:45)
+
+**Setup:** Install StockyShift on a dev store that does NOT have it installed
+yet (create a fresh dev store in Partner Dashboard if needed — seed nothing).
+
+**Screen:** Open the install URL in a browser logged into the store admin:
+`https://stockyshift.onrender.com/auth?shop=STORE.myshopify.com`
+→ Shopify's install confirmation screen ("StockyShift is requesting access…")
+→ click **Install** → app opens in the admin.
+
+**Narration:**
+> "Here's what getting started looks like. One click to install — no credit card,
+> no setup wizard, no configuration. The trial starts the moment you're in, and
+> StockyShift syncs your products automatically — so the moment you open it,
+> it already knows what you sell."
+
+**Action:** Let the install confirmation screen sit 2 seconds before clicking.
+After the app opens, pause 3 seconds, then STOP recording.
+
+**Off-camera between takes (not recorded):**
+In the app: Products tab → create Ceramic Mug (stock 2), Linen T-Shirt (4),
+Canvas Tote (15) → set reorder points 5 / 5 / 10 → Vendors tab → add
+Sunrise Ceramics (contact@sunriseceramics.com) → assign to Mug + T-Shirt.
+
+---
+
+## Take B — Scenes 1–7 (~3:00)
+
+## Scene 1 — The problem (0:45–1:20)
 
 **Screen:** App opens on the Low Stock view — Ceramic Mug shows "2" with warning
 badge, Linen T-Shirt shows "4". No clicks needed.
@@ -43,7 +71,7 @@ badge, Linen T-Shirt shows "4". No clicks needed.
 
 ---
 
-## Scene 2 — Reorder points (0:35–1:10)
+## Scene 2 — Reorder points (1:20–1:55)
 
 **Screen:** Products tab → click Edit on Canvas Tote → reorder point 10 →
 change to 20 → Save → **badge flips green → red live on screen** (no refresh).
@@ -59,18 +87,20 @@ change to 20 → Save → **badge flips green → red live on screen** (no refre
 
 ---
 
-## Scene 3 — Vendors (1:10–1:30)
+## Scene 3 — Vendors (1:55–2:20)
 
-**Screen:** Vendors tab → Add Vendor → Sunrise Ceramics → contact@sunriseceramics.com → Save → show the row.
+**Screen:** Vendors tab → show the Sunrise Ceramics row (already created).
 
 **Narration:**
 > "Add each supplier once — name and email — and they're stored and reused on
 > every purchase order. No more hunting through old emails for who you bought
 > your mugs from."
 
+**Action:** Hover the row slowly; no clicks needed.
+
 ---
 
-## Scene 4 — One-click PO (1:30–2:15)
+## Scene 4 — One-click PO (2:20–3:00)
 
 **Screen:** Low Stock tab → click "Order" on Ceramic Mug → PO modal shows
 quantity 3 pre-filled, vendor Sunrise Ceramics → click "Create Purchase Order".
@@ -86,11 +116,12 @@ quantity 3 pre-filled, vendor Sunrise Ceramics → click "Create Purchase Order"
 
 ---
 
-## Scene 5 — The deliverable (2:15–2:55)
+## Scene 5 — The deliverable (3:00–3:35)
 
-**Screen:** Purchase Orders tab → open the PO → click "Export CSV" → show the
-downloaded CSV file in Downloads. Dashboard stays intact. (The Send button is
-visible in the PO row — do NOT click it on camera; narration only.)
+**Screen:** Purchase Orders tab → open the PO → click "Export CSV" → then OPEN
+the downloaded CSV in Numbers/Excel so the file is visible on screen. Dashboard
+stays intact. (The Send button is visible in the PO row — do NOT click it on
+camera; narration only.)
 
 **Narration:**
 > "Every purchase order exports as a clean CSV file — keep it for your records,
@@ -98,9 +129,11 @@ visible in the PO row — do NOT click it on camera; narration only.)
 > more official, Send emails the PO straight to them with a ready-to-print PDF
 > attached."
 
+**Action:** 2 seconds on the open CSV file before switching back.
+
 ---
 
-## Scene 6 — Pricing (2:55–3:15)
+## Scene 6 — Pricing (3:35–3:55)
 
 **Screen:** Settings tab — subscription card (Starter, $29.00/month, status).
 
@@ -113,7 +146,7 @@ visible in the PO row — do NOT click it on camera; narration only.)
 
 ---
 
-## Scene 7 — Close (3:15–3:30)
+## Scene 7 — Close (3:55–4:10)
 
 **Screen:** Back to Low Stock view.
 
@@ -124,11 +157,15 @@ visible in the PO row — do NOT click it on camera; narration only.)
 
 ---
 
+## After recording
+
+1. Save both takes into `/Users/yashoraj/stockyshift/recordings/` and tell me the filenames
+2. I will: find scene boundaries, overlay narration per scene, assemble to
+   1600-wide master → you upload as new YouTube video (unlisted, same title)
+3. Swap the new URL into the listing's Screencast field
+
 ## Upload rules
 
 - Unlisted YouTube video (not public)
 - Title: StockyShift — Low Stock Alerts & Purchase Orders for Shopify
-- Calm narration at normal volume, or background music only (no loud audio)
-- One clean take per scene; if you mess up, re-record just that scene
-
-Paste the unlisted URL into the listing form → Screencast URL field → Submit.
+- Calm narration at normal volume (no loud audio)

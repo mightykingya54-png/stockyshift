@@ -11,6 +11,7 @@ RATE = "-5%"  # calm, clear pacing for a product demo
 OUT = Path(__file__).parent
 
 SCENES = {
+    "scene0": "Here's what getting started looks like. One click to install — no credit card, no setup wizard, no configuration. The trial starts the moment you're in, and StockyShift syncs your products automatically — so the moment you open it, it already knows what you sell.",
     "scene1": "Open StockyShift from your Shopify admin, and here's the first thing you see — everything you're about to run out of. Ceramic Mug: two left, reorder point five. Linen T-Shirt: four left, reorder point five. Both flagged before a customer ever hits an out-of-stock page. Canvas Tote's at fifteen — no alert. StockyShift only nags you when it matters.",
     "scene2": "Each product has its own reorder point — your minimum healthy stock. The Tote's at fifteen with a reorder point of ten — healthy, no alert. But say you want a bigger buffer. Set it to twenty, save — and watch, StockyShift flags it instantly. Set it once, and it watches from then on — daily automatic sync means your numbers are always current.",
     "scene3": "Add each supplier once — name and email — and they're stored and reused on every purchase order. No more hunting through old emails for who you bought your mugs from.",
