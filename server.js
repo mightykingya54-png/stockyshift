@@ -616,6 +616,38 @@ app.get('/api/config', (req, res) => {
   });
 });
 
+// ─── Launch Metrics (aggregate counts only — no shop names, no PII) ──────
+// Protected by METRICS_TOKEN env var (header: x-metrics-token). Returns
+// install/trial/subscription numbers so the founder can snapshot weekly
+// numbers without logging into the Partner Dashboard.
+
+app.get('/admin/metrics', async (req, res) => {
+  const token = process.env.METRICS_TOKEN;
+  if (!token || req.get('x-metrics-token') !== token) {
+    return res.status(404).send('Not found'); // hide endpoint when misconfigured
+  }
+  try {
+    const total = await db.get('SELECT COUNT(*) AS n FROM merchants');
+    const active = await db.get('SELECT COUNT(*) AS n FROM merchants WHERE is_active = 1');
+    const uninstalled = await db.get('SELECT COUNT(*) AS n FROM merchants WHERE uninstalled_at IS NOT NULL');
+    const today = await db.get("SELECT COUNT(*) AS n FROM merchants WHERE date(installed_at) = date('now')");
+    const byStatus = await db.all('SELECT billing_status, COUNT(*) AS n FROM merchants GROUP BY billing_status');
+    const status = {};
+    for (const row of byStatus) status[row.billing_status] = row.n;
+    res.json({
+      generated_at: new Date().toISOString(),
+      total_installs: total.n,
+      active_installs: active.n,
+      uninstalls: uninstalled.n,
+      installs_today: today.n,
+      status,
+    });
+  } catch (e) {
+    console.error('metrics error:', e);
+    res.status(500).json({ error: 'metrics failed' });
+  }
+});
+
 // ─── Embedded App Entry ──────────────────────────────────────────────────
 
 // Serve the dashboard for any root request with a shop parameter
