@@ -620,6 +620,12 @@ app.get('/api/config', (req, res) => {
 // Protected by METRICS_TOKEN env var (header: x-metrics-token). Returns
 // install/trial/subscription numbers so the founder can snapshot weekly
 // numbers without logging into the Partner Dashboard.
+//
+// REAL vs TEST filtering: any install before LAUNCH_DATE (default 2026-08-11,
+// the App Store publish date) could only have been the founder's own
+// testing — the app was not discoverable before then. TEST_SHOPS (optional,
+// comma-separated shop domains) excludes additional shops. The "real_*"
+// numbers are the ones that matter.
 
 app.get('/admin/metrics', async (req, res) => {
   const token = process.env.METRICS_TOKEN;
@@ -627,28 +633,40 @@ app.get('/admin/metrics', async (req, res) => {
     return res.status(404).send('Not found'); // hide endpoint when misconfigured
   }
   try {
-    const total = await db.get('SELECT COUNT(*) AS n FROM merchants');
-    const active = await db.get('SELECT COUNT(*) AS n FROM merchants WHERE is_active = 1');
-    const uninstalled = await db.get('SELECT COUNT(*) AS n FROM merchants WHERE uninstalled_at IS NOT NULL');
-    const today = await db.get("SELECT COUNT(*) AS n FROM merchants WHERE date(installed_at) = date('now')");
-    const byStatus = await db.all('SELECT billing_status, COUNT(*) AS n FROM merchants GROUP BY billing_status');
+    const launchDate = process.env.LAUNCH_DATE || '2026-08-11';
+    const testSet = new Set(
+      (process.env.TEST_SHOPS || '').split(',').map((s) => s.trim()).filter(Boolean)
+    );
+    const rows = await db.all(
+      'SELECT shop, billing_status, installed_at, uninstalled_at, is_active FROM merchants'
+    );
+    const isTest = (r) =>
+      testSet.has(r.shop) || (r.installed_at || '').slice(0, 10) < launchDate;
+    const real = rows.filter((r) => !isTest(r));
+    const test = rows.filter(isTest);
+
     const status = {};
-    for (const row of byStatus) status[row.billing_status] = row.n;
+    const realStatus = {};
+    for (const r of rows) status[r.billing_status] = (status[r.billing_status] || 0) + 1;
+    for (const r of real) realStatus[r.billing_status] = (realStatus[r.billing_status] || 0) + 1;
+
     const payload = {
       generated_at: new Date().toISOString(),
-      total_installs: total.n,
-      active_installs: active.n,
-      uninstalls: uninstalled.n,
-      installs_today: today.n,
+      total_installs: rows.length,
+      test_installs: test.length,
+      real_installs: real.length,
+      real_active: real.filter((r) => r.is_active === 1).length,
+      real_uninstalls: real.filter((r) => r.uninstalled_at).length,
+      installs_today: rows.filter((r) => (r.installed_at || '').slice(0, 10) === new Date().toISOString().slice(0, 10)).length,
       status,
+      real_status: realStatus,
     };
     // Optional: ?shops=1 lists shop domains so the founder can separate
     // their own test/dev stores from real merchants. Token-protected.
     if (req.query.shops === '1') {
-      const shops = await db.all(
-        'SELECT shop, billing_status, installed_at, uninstalled_at FROM merchants ORDER BY installed_at'
-      );
-      payload.shops = shops;
+      payload.shops = rows
+        .map((r) => ({ shop: r.shop, billing_status: r.billing_status, installed_at: r.installed_at, uninstalled_at: r.uninstalled_at, is_test: isTest(r) ? 1 : 0 }))
+        .sort((a, b) => (a.installed_at || '').localeCompare(b.installed_at || ''));
     }
     res.json(payload);
   } catch (e) {

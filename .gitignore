@@ -1,8 +1,2 @@
-node_modules/
-.env
-*.db
-*.db-shm
-*.db-wal
-.DS_Store
-narration/*.mp3
-recordings/
+stockymetrics-2026
+scripts/.token
