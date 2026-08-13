@@ -5,7 +5,8 @@ Reference: 127809
 
 | Date | Installs | Active installs | In trial | Subscribed | Uninstalls |
 |------|----------|-----------------|----------|------------|------------|
-| 2026-08-11 | 0 | 0 | 0 | 0 | 0 | (published today — baseline) |
+| 2026-08-11 | 0 | 0 | 0 | 0 | 0 | (published — baseline) |
+| 2026-08-13 | 17 | 16 | 10 | 5 | 1 | first snapshot — endpoint live |
 
 ## How to snapshot
 

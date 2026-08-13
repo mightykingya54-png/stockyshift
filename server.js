@@ -634,14 +634,23 @@ app.get('/admin/metrics', async (req, res) => {
     const byStatus = await db.all('SELECT billing_status, COUNT(*) AS n FROM merchants GROUP BY billing_status');
     const status = {};
     for (const row of byStatus) status[row.billing_status] = row.n;
-    res.json({
+    const payload = {
       generated_at: new Date().toISOString(),
       total_installs: total.n,
       active_installs: active.n,
       uninstalls: uninstalled.n,
       installs_today: today.n,
       status,
-    });
+    };
+    // Optional: ?shops=1 lists shop domains so the founder can separate
+    // their own test/dev stores from real merchants. Token-protected.
+    if (req.query.shops === '1') {
+      const shops = await db.all(
+        'SELECT shop, billing_status, installed_at, uninstalled_at FROM merchants ORDER BY installed_at'
+      );
+      payload.shops = shops;
+    }
+    res.json(payload);
   } catch (e) {
     console.error('metrics error:', e);
     res.status(500).json({ error: 'metrics failed' });
