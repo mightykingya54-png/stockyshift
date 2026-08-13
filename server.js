@@ -2199,6 +2199,18 @@ app.post('/api/billing/create', async (req, res) => {
         String(s.status).toUpperCase() === 'ACTIVE' || String(s.status).toUpperCase() === 'TRIALING'
       );
       if (activeSub) {
+        // Trial-leak fix: if this store already used its one free trial
+        // (trial_used=1), a Resubscribe must NOT grant a new trial window —
+        // heal straight to 'active'. Only first-time subscriptions get the
+        // trial days Shopify reports.
+        const alreadyTrialled = merchant.trial_used === 1;
+        if (alreadyTrialled) {
+          await db.run(`UPDATE merchants SET billing_status = 'active', trial_ends_at = NULL, shopify_charge_id = $1 WHERE shop = $2`, [
+            String(activeSub.id).replace(/^gid:\/\/shopify\/AppSubscription\//, ''), shop,
+          ]);
+          console.log(`[Billing] ${shop} resubscribe with used trial — healed straight to 'active' (no re-trial)`);
+          return res.json({ confirmation_url: `https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift` });
+        }
         const trialEnd = activeSub.remainingTrialDays && activeSub.remainingTrialDays > 0
           ? new Date(Date.now() + activeSub.remainingTrialDays * 86400000).toISOString()
           : new Date(Date.now() + BILLING_PLAN.trial_days * 86400000).toISOString();
@@ -2346,6 +2358,21 @@ app.get('/billing/confirm', async (req, res) => {
       // a trial window from Shopify's remainingTrialDays (fall back to our plan
       // config), and trial_used. Same normalization as the /api/billing/create
       // heal block.
+      // Trial-leak fix: stores that already used their one free trial go
+      // straight to 'active' on resubscribe — never another trial window.
+      const confirmMerchant = await db.get('SELECT trial_used FROM merchants WHERE shop = $1', [shop]);
+      if (confirmMerchant?.trial_used === 1) {
+        await db.run(`
+          UPDATE merchants SET
+            billing_status = 'active',
+            trial_ends_at = NULL,
+            shopify_charge_id = $1,
+            trial_used = 1
+          WHERE shop = $2
+        `, [String(liveSub.id).replace(/^gid:\/\/shopify\/AppSubscription\//, ''), shop]);
+        console.log(`[Billing] ${shop} resubscribe with used trial (confirm) — healed straight to 'active'`);
+        return res.redirect(`https://admin.shopify.com/store/${storeSlug(shop)}/apps/stockyshift`);
+      }
       const trialEnd = liveSub.remainingTrialDays && liveSub.remainingTrialDays > 0
         ? new Date(Date.now() + liveSub.remainingTrialDays * 86400000).toISOString()
         : new Date(Date.now() + BILLING_PLAN.trial_days * 86400000).toISOString();
